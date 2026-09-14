@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#10151d" />
+    <title>Deckforge — MTG deck builder</title>
+    <link rel="preconnect" href="https://api.scryfall.com" />
+    <link rel="preconnect" href="https://cards.scryfall.io" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#top" aria-label="Deckforge home">
+          <span class="brand-mark">✦</span>
+          <span>DECKFORGE<small>your collection, battle-ready</small></span>
+        </a>
+
+        <nav class="main-nav" aria-label="Main navigation">
+          <a class="nav-link active" href="#builder"><span>◈</span> Build a deck</a>
+          <a class="nav-link" href="#collection"><span>▦</span> My collection</a>
+          <a class="nav-link" href="#rules"><span>◌</span> Rules check</a>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="collection-meter">
+            <span>Collection</span>
+            <strong id="collectionCount">0 cards</strong>
+            <div class="meter-track"><i id="collectionMeter"></i></div>
+          </div>
+          <button class="ghost-button small" id="exampleButton">Load an example collection</button>
+        </div>
+      </aside>
+
+      <main id="top">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">DECK INTELLIGENCE</p>
+            <h1>Build from what you own.</h1>
+          </div>
+          <div class="top-actions">
+            <button class="text-button" id="clearCollectionButton">Clear collection</button>
+            <button class="primary-button" id="openImportButton">Import cards <span>↑</span></button>
+          </div>
+        </header>
+
+        <section class="hero-grid" id="builder">
+          <div class="hero-copy">
+            <p class="eyebrow gold">YOUR DECK ASSISTANT</p>
+            <h2>Find the sharpest deck<br />hiding in your cards.</h2>
+            <p class="lede">Choose how you like to play. Deckforge uses your recorded collection, mana needs, color identity, copy limits, and format rules to assemble the strongest legal starting list it can find.</p>
+            <div class="signal-row">
+              <span><b>01</b> add collection</span><i></i><span><b>02</b> choose a battle plan</span><i></i><span><b>03</b> generate</span>
+            </div>
+          </div>
+          <div class="hero-card" aria-hidden="true">
+            <div class="card-glow"></div>
+            <div class="card-art"><span>✦</span><em>ARCANE<br />ASSEMBLY</em></div>
+            <div class="hero-card-footer"><span>DECKFORGE</span><b>60 / 100</b></div>
+          </div>
+        </section>
+
+        <section class="configuration panel">
+          <div class="section-heading">
+            <div><p class="eyebrow">01 / CONFIGURE</p><h3>What are we building for?</h3></div>
+            <p class="subtle">A recommendation is only as good as the battlefield it expects.</p>
+          </div>
+          <div class="config-grid">
+            <label class="field-label">FORMAT
+              <select id="formatSelect">
+                <option value="casual">Casual / Kitchen Table</option>
+                <option value="standard">Standard</option>
+                <option value="pioneer">Pioneer</option>
+                <option value="modern">Modern</option>
+                <option value="legacy">Legacy</option>
+                <option value="vintage">Vintage</option>
+                <option value="commander">Commander</option>
+              </select>
+            </label>
+            <label class="field-label">PLAYSTYLE
+              <select id="styleSelect">
+                <option value="balanced">Balanced — flexible threats & answers</option>
+                <option value="aggro">Aggro — apply pressure early</option>
+                <option value="midrange">Midrange — efficient value & pressure</option>
+                <option value="control">Control — answers, card advantage, finishers</option>
+                <option value="ramp">Ramp — accelerate into powerful spells</option>
+                <option value="tokens">Tokens — go wide & multiply value</option>
+                <option value="combo">Combo — assemble a decisive interaction</option>
+              </select>
+            </label>
+            <label class="field-label commander-only">COMMANDER
+              <select id="commanderSelect"><option value="">Choose from your legendary creatures</option></select>
+            </label>
+            <div class="color-setting noncommander-only">
+              <span class="field-label">COLORS TO CONSIDER</span>
+              <div class="color-pips" id="colorPips">
+                <button data-color="W" title="White">W</button><button data-color="U" title="Blue">U</button><button data-color="B" title="Black">B</button><button data-color="R" title="Red">R</button><button data-color="G" title="Green">G</button>
+              </div>
+              <small>Leave all off to let Deckforge find the strongest colors.</small>
+            </div>
+          </div>
+          <div class="generate-row">
+            <label class="toggle"><input type="checkbox" id="strictOwnedToggle" checked /><span></span> Use only quantities in my collection</label>
+            <button class="generate-button" id="generateButton">Generate my best deck <span>→</span></button>
+          </div>
+        </section>
+
+        <section class="output-section" id="deckOutput">
+          <div class="empty-deck" id="emptyDeck">
+            <div class="empty-glyph">✦</div>
+            <h3>Your deck will appear here.</h3>
+            <p>Add the cards you own, then choose a format and game plan.</p>
+            <button class="secondary-button" id="emptyImportButton">Add cards to my collection</button>
+          </div>
+          <div class="deck-result hidden" id="deckResult">
+            <div class="deck-result-header">
+              <div>
+                <p class="eyebrow gold">RECOMMENDED LIST</p>
+                <h2 id="deckTitle">Battle-ready deck</h2>
+                <p id="deckSubtitle" class="deck-subtitle"></p>
+              </div>
+              <div class="deck-actions"><button class="text-button" id="copyDeckButton">Copy list</button><button class="secondary-button" id="exportDeckButton">Download .txt</button></div>
+            </div>
+            <div class="result-grid">
+              <article class="deck-list-card">
+                <div class="deck-list-summary"><strong id="deckTotal">0</strong><span>cards in main deck</span><div id="deckColorDots" class="deck-colors"></div></div>
+                <div id="deckList" class="deck-list"></div>
+              </article>
+              <aside class="insights-column">
+                <article class="insight-card"><p class="eyebrow">THE PLAN</p><h4 id="planTitle"></h4><p id="planText"></p></article>
+                <article class="insight-card mana-card"><p class="eyebrow">MANA CURVE</p><div id="manaCurve" class="mana-curve"></div><div class="curve-labels"><span>1</span><span>2</span><span>3</span><span>4</span><span>5+</span></div></article>
+                <article class="insight-card"><p class="eyebrow">RULES STATUS</p><div id="rulesStatus" class="rules-status"></div><button class="text-button rules-link" id="viewRulesButton">See every check →</button></article>
+              </aside>
+            </div>
+          </div>
+        </section>
+
+        <section class="collection-section" id="collection">
+          <div class="section-heading collection-heading"><div><p class="eyebrow">02 / COLLECTION</p><h3>Your available cards</h3></div><button class="secondary-button" id="collectionImportButton">+ Add cards</button></div>
+          <div class="collection-tools"><input id="collectionSearch" type="search" placeholder="Search your collection" /><div class="collection-stat"><b id="uniqueCount">0</b> unique cards</div></div>
+          <div id="collectionGrid" class="collection-grid"><div class="collection-empty">No cards yet. Import a list or add cards one at a time.</div></div>
+        </section>
+
+        <section id="rules" class="rules-section panel">
+          <div class="section-heading"><div><p class="eyebrow">03 / RULES ENGINE</p><h3>What Deckforge checks</h3></div></div>
+          <div class="rule-grid">
+            <div><b>Deck size</b><p>At least 60 cards in constructed formats; exactly 100 including a commander in Commander.</p></div>
+            <div><b>Copy limits</b><p>Up to four of a card by English name, except basic lands and cards whose text says otherwise.</p></div>
+            <div><b>Commander identity</b><p>Every card must fit the commander's color identity; the commander must be a legal commander.</p></div>
+            <div><b>Format legality</b><p>For cards fetched from Scryfall, current format legality is screened before building.</p></div>
+          </div>
+          <p class="fine-print">Deckforge is a planning assistant, not a tournament judge. Always check your event’s current banned list, companion restrictions, and individual card text before play.</p>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="importDialog" class="import-dialog">
+      <form method="dialog" class="modal-head"><div><p class="eyebrow gold">COLLECTION INTAKE</p><h2>Add cards you own</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></form>
+      <div class="import-tabs"><button class="import-tab active" data-tab="paste">Paste a list</button><button class="import-tab" data-tab="single">Add one card</button></div>
+      <div class="tab-panel active" id="pastePanel">
+        <p>Paste lines such as <code>4 Lightning Bolt</code> or <code>Sol Ring</code>. Deckforge will look up card details automatically.</p>
+        <textarea id="importText" placeholder="4 Llanowar Elves&#10;3 Elvish Mystic&#10;2 Overrun"></textarea>
+        <div class="modal-actions"><span id="importMessage"></span><button class="primary-button" id="importListButton" type="button">Add list →</button></div>
+      </div>
+      <div class="tab-panel" id="singlePanel">
+        <label class="field-label">CARD NAME<input id="singleCardName" placeholder="e.g. Sheoldred, the Apocalypse" /></label>
+        <label class="field-label">QUANTITY<input id="singleQuantity" type="number" min="1" max="99" value="1" /></label>
+        <div class="modal-actions"><span id="singleMessage"></span><button class="primary-button" id="addSingleButton" type="button">Look up & add →</button></div>
+      </div>
+      <p class="modal-foot">Card details and images are supplied by the Scryfall public card database when you add a card.</p>
+    </dialog>
+
+    <dialog id="rulesDialog" class="rules-dialog">
+      <form method="dialog" class="modal-head"><div><p class="eyebrow gold">RULES STATUS</p><h2>Deck validation</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></form>
+      <div id="fullRulesReport" class="full-rules-report"></div>
+    </dialog>
+
+    <template id="collectionCardTemplate">
+      <article class="collection-card">
+        <div class="collection-image"></div><div class="collection-card-info"><strong></strong><span></span></div><div class="card-quantity"></div><button class="remove-card" title="Remove card">×</button>
+      </article>
+    </template>
+    <script src="app.js"></script>
+  </body>
+</html>
