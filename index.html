@@ -157,18 +157,24 @@
 
     <dialog id="importDialog" class="import-dialog">
       <form method="dialog" class="modal-head"><div><p class="eyebrow gold">COLLECTION INTAKE</p><h2>Add cards you own</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></form>
-      <div class="import-tabs"><button class="import-tab active" data-tab="paste">Paste a list</button><button class="import-tab" data-tab="single">Add one card</button></div>
+      <div class="import-tabs"><button class="import-tab active" data-tab="paste">Paste a list</button><button class="import-tab arena-tab" data-tab="arena">MTG Arena deck</button><button class="import-tab" data-tab="single">Add one card</button></div>
       <div class="tab-panel active" id="pastePanel">
         <p>Paste lines such as <code>4 Lightning Bolt</code> or <code>Sol Ring</code>. Deckforge will look up card details automatically.</p>
         <textarea id="importText" placeholder="4 Llanowar Elves&#10;3 Elvish Mystic&#10;2 Overrun"></textarea>
         <div class="modal-actions"><span id="importMessage"></span><button class="primary-button" id="importListButton" type="button">Add list →</button></div>
+      </div>
+      <div class="tab-panel" id="arenaPanel">
+        <div class="arena-callout"><span>✦</span><p>In MTG Arena, open a deck and use <b>Export</b> to copy its list. Paste it here—Deck, Commander, Companion, and Sideboard headings are understood.</p></div>
+        <textarea id="arenaImportText" placeholder="Deck&#10;4 Lightning Bolt (STA) 42&#10;4 Monastery Swiftspear (BRO) 144&#10;20 Mountain (DMU) 272&#10;&#10;Sideboard&#10;2 Abrade (VOW) 139"></textarea>
+        <label class="import-toggle"><input type="checkbox" id="arenaMaxToggle" checked /><span></span><div><b>Avoid double-counting</b><small>Keep the highest quantity already saved for each card. Ideal when importing several Arena decks.</small></div></label>
+        <div class="modal-actions"><span id="arenaImportMessage" aria-live="polite"></span><button class="primary-button" id="arenaImportButton" type="button">Import Arena deck →</button></div>
       </div>
       <div class="tab-panel" id="singlePanel">
         <label class="field-label">CARD NAME<input id="singleCardName" placeholder="e.g. Sheoldred, the Apocalypse" /></label>
         <label class="field-label">QUANTITY<input id="singleQuantity" type="number" min="1" max="99" value="1" /></label>
         <div class="modal-actions"><span id="singleMessage"></span><button class="primary-button" id="addSingleButton" type="button">Look up & add →</button></div>
       </div>
-      <p class="modal-foot">Card details and images are supplied by the Scryfall public card database when you add a card.</p>
+      <p class="modal-foot">Arena imports add the cards from a copied deck—not an entire Arena collection. Card details and images are supplied by the Scryfall public card database.</p>
     </dialog>
 
     <dialog id="rulesDialog" class="rules-dialog">

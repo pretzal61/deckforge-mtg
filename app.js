@@ -21,7 +21,7 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 const els = {
   format: $('#formatSelect'), style: $('#styleSelect'), commander: $('#commanderSelect'), collectionGrid: $('#collectionGrid'),
   collectionCount: $('#collectionCount'), uniqueCount: $('#uniqueCount'), collectionMeter: $('#collectionMeter'), collectionSearch: $('#collectionSearch'),
-  importDialog: $('#importDialog'), rulesDialog: $('#rulesDialog'), importText: $('#importText'), importMessage: $('#importMessage'), singleMessage: $('#singleMessage'),
+  importDialog: $('#importDialog'), rulesDialog: $('#rulesDialog'), importText: $('#importText'), importMessage: $('#importMessage'), arenaImportText: $('#arenaImportText'), arenaImportMessage: $('#arenaImportMessage'), singleMessage: $('#singleMessage'),
   emptyDeck: $('#emptyDeck'), deckResult: $('#deckResult'), deckTitle: $('#deckTitle'), deckSubtitle: $('#deckSubtitle'), deckTotal: $('#deckTotal'),
   deckList: $('#deckList'), deckColorDots: $('#deckColorDots'), planTitle: $('#planTitle'), planText: $('#planText'), manaCurve: $('#manaCurve'), rulesStatus: $('#rulesStatus'), fullRulesReport: $('#fullRulesReport')
 };
@@ -235,8 +235,15 @@ async function lookupCard(name) {
   const data = await response.json(); const face = data.card_faces?.[0] || data;
   return { id: data.id || `manual-${normalizeName(data.name)}`, name: data.name, quantity: 0, manaCost: data.mana_cost || face.mana_cost || '', cmc: data.cmc || 0, colorIdentity: data.color_identity || [], typeLine: data.type_line || face.type_line || '', oracleText: data.oracle_text || data.card_faces?.map(f => f.oracle_text || '').join(' // ') || '', legalities: data.legalities || null, imageUri: data.image_uris?.small || face.image_uris?.small || '', rarity: data.rarity || '' };
 }
-function mergeCard(incoming, quantity) { const existing = collection.find(card => normalizeName(card.name) === normalizeName(incoming.name)); if (existing) { existing.quantity += quantity; Object.assign(existing, incoming, { quantity: existing.quantity }); } else collection.push({ ...incoming, quantity }); persist(); }
-async function addNamedCard(name, quantity, messageElement) { messageElement.textContent = `Looking up ${name}…`; const card = await lookupCard(name); mergeCard(card, quantity); messageElement.textContent = `Added ${quantity}× ${card.name}.`; return card; }
+function mergeCard(incoming, quantity, mode = 'add') {
+  const existing = collection.find(card => normalizeName(card.name) === normalizeName(incoming.name));
+  if (existing) {
+    const nextQuantity = mode === 'maximum' ? Math.max(existing.quantity, quantity) : existing.quantity + quantity;
+    Object.assign(existing, incoming, { quantity: nextQuantity });
+  } else collection.push({ ...incoming, quantity });
+  persist();
+}
+async function addNamedCard(name, quantity, messageElement, mode = 'add') { messageElement.textContent = `Looking up ${name}…`; const card = await lookupCard(name); mergeCard(card, quantity, mode); messageElement.textContent = `Added ${quantity}× ${card.name}.`; return card; }
 
 async function importList() {
   const lines = els.importText.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean); if (!lines.length) { els.importMessage.textContent = 'Paste at least one card name.'; return; }
@@ -248,7 +255,48 @@ async function importList() {
   els.importMessage.textContent = `Added ${added} card${added === 1 ? '' : ' names'}${misses.length ? ` · couldn’t find: ${misses.join(', ')}` : ''}`;
   if (!misses.length) setTimeout(() => els.importDialog.close(), 600);
 }
-function openImport() { els.importMessage.textContent = ''; els.singleMessage.textContent = ''; els.importDialog.showModal(); }
+
+function parseArenaDeck(text) {
+  const sections = { deck: 0, commander: 0, companion: 0, sideboard: 0, other: 0 };
+  const cards = new Map(); let currentSection = 'deck'; let ignored = 0;
+  const headingMap = { deck: 'deck', commander: 'commander', companion: 'companion', sideboard: 'sideboard' };
+  text.replace(/^\uFEFF/, '').split(/\r?\n/).forEach(rawLine => {
+    const line = rawLine.trim(); if (!line) return;
+    const heading = line.toLowerCase().replace(/:$/, '');
+    if (headingMap[heading]) { currentSection = headingMap[heading]; return; }
+    // Arena may place About and Name metadata ahead of the deck's card lines.
+    if (heading === 'about' || /^name\s+/i.test(line)) return;
+    const quantityMatch = line.match(/^(\d+)\s*(?:x\s*)?(.+?)\s*$/i);
+    if (!quantityMatch) { ignored++; return; }
+    const quantity = Number(quantityMatch[1]); let name = quantityMatch[2].trim();
+    // Arena includes a printing suffix such as "(DMU) 272". Scryfall's named lookup wants only the card name.
+    const printingSuffix = name.match(/^(.*?)\s+\([^)]+\)\s+(\S+)$/);
+    if (printingSuffix) name = printingSuffix[1].trim();
+    if (!name || !Number.isFinite(quantity) || quantity < 1) { ignored++; return; }
+    const key = normalizeName(name); const item = cards.get(key) || { name, quantities: {}, sections: new Set() };
+    item.quantities[currentSection] = (item.quantities[currentSection] || 0) + quantity;
+    item.sections.add(currentSection); cards.set(key, item); sections[currentSection] += quantity;
+  });
+  // A companion is commonly repeated in Sideboard. For a collection, a deck requires the largest zone count—not a sum across zones.
+  return { cards: [...cards.values()].map(item => ({ ...item, quantity: Math.max(...Object.values(item.quantities)) })), sections, ignored };
+}
+
+async function importArenaDeck() {
+  const parsed = parseArenaDeck(els.arenaImportText.value);
+  if (!parsed.cards.length) { els.arenaImportMessage.textContent = 'No Arena card lines found. Use Arena’s Export button, then paste the copied deck here.'; return; }
+  const keepHighest = $('#arenaMaxToggle').checked; let added = 0; const misses = [];
+  $('#arenaImportButton').disabled = true;
+  for (const item of parsed.cards) {
+    try { await addNamedCard(item.name, item.quantity, els.arenaImportMessage, keepHighest ? 'maximum' : 'add'); added++; }
+    catch (error) { misses.push(item.name); }
+  }
+  $('#arenaImportButton').disabled = false; persist(); renderCollection();
+  const count = Object.values(parsed.sections).reduce((sum, number) => sum + number, 0);
+  const sectionSummary = Object.entries(parsed.sections).filter(([, number]) => number).map(([section, number]) => `${section === 'deck' ? 'main deck' : section} ${number}`).join(' · ');
+  els.arenaImportMessage.textContent = `Imported ${added} card${added === 1 ? '' : ' names'} / ${count} deck cards (${sectionSummary})${misses.length ? ` · couldn’t find: ${misses.join(', ')}` : ''}`;
+  if (!misses.length) setTimeout(() => els.importDialog.close(), 850);
+}
+function openImport() { els.importMessage.textContent = ''; els.arenaImportMessage.textContent = ''; els.singleMessage.textContent = ''; els.importDialog.showModal(); }
 function copyDeck() { if (!currentDeck) return; navigator.clipboard?.writeText(decklistText()).then(() => { $('#copyDeckButton').textContent = 'Copied!'; setTimeout(() => $('#copyDeckButton').textContent = 'Copy list', 1200); }); }
 function decklistText() { const lines = []; if (currentDeck.commander) lines.push(`Commander\n1 ${currentDeck.commander.name}\n`); const groups = {}; currentDeck.deck.filter(entry => entry.card.id !== currentDeck.commander?.id).forEach(entry => (groups[groupForCard(entry.card)] ||= []).push(entry)); ['Creatures','Planeswalkers','Instants','Sorceries','Artifacts','Other spells','Lands'].forEach(group => { if (groups[group]) { lines.push(group); groups[group].sort((a,b)=>a.card.name.localeCompare(b.card.name)).forEach(entry => lines.push(`${entry.count} ${entry.card.name}`)); lines.push(''); } }); return lines.join('\n').trim(); }
 function exportDeck() { if (!currentDeck) return; const blob = new Blob([decklistText()], { type:'text/plain' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'deckforge-decklist.txt'; a.click(); URL.revokeObjectURL(a.href); }
@@ -263,7 +311,7 @@ function loadExample() {
 
 // Events
 $('#openImportButton').addEventListener('click', openImport); $('#emptyImportButton').addEventListener('click', openImport); $('#collectionImportButton').addEventListener('click', openImport);
-$('#importListButton').addEventListener('click', importList); $('#addSingleButton').addEventListener('click', async () => { const name = $('#singleCardName').value.trim(); const qty = Math.max(1, Number($('#singleQuantity').value || 1)); if (!name) { els.singleMessage.textContent = 'Enter a card name.'; return; } try { $('#addSingleButton').disabled = true; await addNamedCard(name, qty, els.singleMessage); persist(); renderCollection(); $('#singleCardName').value = ''; } catch (error) { els.singleMessage.textContent = error.message; } finally { $('#addSingleButton').disabled = false; } });
+$('#importListButton').addEventListener('click', importList); $('#arenaImportButton').addEventListener('click', importArenaDeck); $('#addSingleButton').addEventListener('click', async () => { const name = $('#singleCardName').value.trim(); const qty = Math.max(1, Number($('#singleQuantity').value || 1)); if (!name) { els.singleMessage.textContent = 'Enter a card name.'; return; } try { $('#addSingleButton').disabled = true; await addNamedCard(name, qty, els.singleMessage); persist(); renderCollection(); $('#singleCardName').value = ''; } catch (error) { els.singleMessage.textContent = error.message; } finally { $('#addSingleButton').disabled = false; } });
 $$('.import-tab').forEach(tab => tab.addEventListener('click', () => { $$('.import-tab').forEach(button => button.classList.toggle('active', button === tab)); $$('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.id === `${tab.dataset.tab}Panel`)); }));
 $('#exampleButton').addEventListener('click', loadExample); $('#clearCollectionButton').addEventListener('click', () => { if (collection.length && confirm('Clear every card from this local collection?')) { collection = []; currentDeck = null; persist(); renderCollection(); els.deckResult.classList.add('hidden'); els.emptyDeck.classList.remove('hidden'); } });
 els.collectionSearch.addEventListener('input', renderCollection); $$('#colorPips button').forEach(button => button.addEventListener('click', () => { const color = button.dataset.color; selectedColors.has(color) ? selectedColors.delete(color) : selectedColors.add(color); button.classList.toggle('selected', selectedColors.has(color)); }));
