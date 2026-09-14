@@ -1,5 +1,6 @@
 /* Deckforge is intentionally local-first. Only card lookups use Scryfall's public API. */
 const STORAGE_KEY = 'deckforge-collection-v1';
+const DECK_STORAGE_KEY = 'deckforge-current-deck-v1';
 const COLORS = ['W', 'U', 'B', 'R', 'G'];
 const FORMAT_LABELS = { casual: 'Casual', standard: 'Standard', pioneer: 'Pioneer', modern: 'Modern', legacy: 'Legacy', vintage: 'Vintage', commander: 'Commander' };
 const STYLE_COPY = {
@@ -13,8 +14,10 @@ const STYLE_COPY = {
 };
 
 let collection = loadCollection();
-let currentDeck = null;
+let currentDeck = loadDeck();
 let selectedColors = new Set();
+let pendingDeckEdit = null;
+let previousDeck = null;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -23,11 +26,26 @@ const els = {
   collectionCount: $('#collectionCount'), uniqueCount: $('#uniqueCount'), collectionMeter: $('#collectionMeter'), collectionSearch: $('#collectionSearch'),
   importDialog: $('#importDialog'), rulesDialog: $('#rulesDialog'), importText: $('#importText'), importMessage: $('#importMessage'), arenaImportText: $('#arenaImportText'), arenaImportMessage: $('#arenaImportMessage'), singleMessage: $('#singleMessage'),
   emptyDeck: $('#emptyDeck'), deckResult: $('#deckResult'), deckTitle: $('#deckTitle'), deckSubtitle: $('#deckSubtitle'), deckTotal: $('#deckTotal'),
-  deckList: $('#deckList'), deckColorDots: $('#deckColorDots'), planTitle: $('#planTitle'), planText: $('#planText'), manaCurve: $('#manaCurve'), rulesStatus: $('#rulesStatus'), fullRulesReport: $('#fullRulesReport')
+  deckList: $('#deckList'), deckColorDots: $('#deckColorDots'), planTitle: $('#planTitle'), planText: $('#planText'), manaCurve: $('#manaCurve'), rulesStatus: $('#rulesStatus'), fullRulesReport: $('#fullRulesReport'),
+  assistantInput: $('#deckAssistantInput'), assistantMessage: $('#deckAssistantMessage'), assistantPreview: $('#deckAssistantPreview'), assistantPreviewText: $('#deckAssistantPreviewText'), reviewDeckEditButton: $('#reviewDeckEditButton'), applyDeckEditButton: $('#applyDeckEditButton'), discardDeckEditButton: $('#discardDeckEditButton'), undoDeckEditButton: $('#undoDeckEditButton')
 };
 
 function loadCollection() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } }
 function persist() { localStorage.setItem(STORAGE_KEY, JSON.stringify(collection)); }
+function loadDeck() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DECK_STORAGE_KEY));
+    if (!saved || !Array.isArray(saved.deck)) return null;
+    return { ...saved, deckColors: new Set(saved.deckColors || []), generatedAt: saved.generatedAt ? new Date(saved.generatedAt) : new Date(), report: [] };
+  } catch { return null; }
+}
+function persistDeck() {
+  try {
+    if (!currentDeck) { localStorage.removeItem(DECK_STORAGE_KEY); return; }
+    const { report, ...saved } = currentDeck;
+    localStorage.setItem(DECK_STORAGE_KEY, JSON.stringify({ ...saved, deckColors: [...(currentDeck.deckColors || [])] }));
+  } catch { /* Local deck storage is a convenience; the current page can still work without it. */ }
+}
 function totalOwned() { return collection.reduce((total, card) => total + card.quantity, 0); }
 function escapeHtml(value = '') { return String(value).replace(/[&<>'"]/g, char => ({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;' })[char]); }
 function normalizeName(name) { return name.trim().toLowerCase(); }
@@ -58,7 +76,13 @@ function renderCollection() {
   refreshCommanderChoices();
 }
 
-function removeCard(id) { collection = collection.filter(card => card.id !== id); persist(); renderCollection(); }
+function removeCard(id) {
+  collection = collection.filter(card => card.id !== id); persist(); renderCollection();
+  if (currentDeck) {
+    clearDeckEditPreview(); currentDeck.report = validateDeck(currentDeck); persistDeck();
+    renderDeck(currentDeck, { scroll: false });
+  }
+}
 function refreshCommanderChoices() {
   const selected = els.commander.value;
   const candidates = collection.filter(card => isCommanderCandidate(card)).sort((a,b) => a.name.localeCompare(b.name));
@@ -184,7 +208,279 @@ function generateDeck() {
   const result = { deck, format, style, commander, deckColors, required, landTarget, landsAdded, strictOwned, generatedAt: new Date() };
   result.report = validateDeck(result);
   currentDeck = result;
+  pendingDeckEdit = null;
+  previousDeck = null;
+  persistDeck();
   renderDeck(result);
+}
+
+function cloneDeckResult(result) {
+  return {
+    ...result,
+    deck: result.deck.map(entry => ({ card: entry.card, count: entry.count })),
+    deckColors: new Set(result.deckColors || []),
+    report: (result.report || []).map(item => ({ ...item }))
+  };
+}
+function sameCard(first, second) { return Boolean(first && second && ((first.id && second.id && first.id === second.id) || normalizeName(first.name) === normalizeName(second.name))); }
+function deckEntryFor(deck, card) { return deck.find(entry => sameCard(entry.card, card)); }
+function deckEntryCount(deck, card) { return deckEntryFor(deck, card)?.count || 0; }
+function removeFromDeck(deck, card, quantity) {
+  const index = deck.findIndex(entry => sameCard(entry.card, card));
+  if (index < 0 || quantity <= 0) return 0;
+  const entry = deck[index]; const removed = Math.min(entry.count, quantity);
+  entry.count -= removed;
+  if (!entry.count) deck.splice(index, 1);
+  return removed;
+}
+function editorCopyLimit(card, result) {
+  if (sameCard(card, result.commander)) return 1;
+  const rulesLimit = result.format === 'commander' ? 1 : isBasicLand(card) ? 99 : 4;
+  return result.strictOwned ? Math.min(rulesLimit, Number(card.quantity || 0)) : rulesLimit;
+}
+function canAddToEditedDeck(card, result) {
+  if (sameCard(card, result.commander) || !meetsColors(card, result.deckColors)) return false;
+  const formatStatus = legalInFormat(card, result.format);
+  return !['banned', 'not_legal'].includes(formatStatus) && deckEntryCount(result.deck, card) < editorCopyLimit(card, result);
+}
+function editorCandidates(result, predicate = () => true) { return collection.filter(card => canAddToEditedDeck(card, result) && predicate(card)); }
+function recordDeckChange(bucket, card, quantity = 1) {
+  const key = card.id || normalizeName(card.name); const current = bucket.get(key) || { card, count: 0 };
+  current.count += quantity; bucket.set(key, current);
+}
+function changeText(bucket) { return [...bucket.values()].map(item => item.count + '× ' + escapeHtml(item.card.name)).join(', '); }
+function countDeckLands(deck) { return deck.filter(entry => cardRole(entry.card).land).reduce((total, entry) => total + entry.count, 0); }
+function genericRemovalScore(card, result) {
+  const role = cardRole(card);
+  return (role.land ? -80 : 0) + role.cmc * 4 - styleScore(card, result.style, result.deckColors);
+}
+function chooseOutgoing(result, incoming, filter = () => true, score = genericRemovalScore) {
+  return result.deck
+    .filter(entry => entry.count && !sameCard(entry.card, result.commander) && !sameCard(entry.card, incoming) && filter(entry.card))
+    .sort((a, b) => score(b.card, result) - score(a.card, result))[0] || null;
+}
+function swapOneCard(result, outgoing, incoming, changes) {
+  const removed = removeFromDeck(result.deck, outgoing.card, 1);
+  const added = addToDeck(result.deck, incoming, 1, editorCopyLimit(incoming, result));
+  if (!added) {
+    addToDeck(result.deck, outgoing.card, removed, editorCopyLimit(outgoing.card, result));
+    return false;
+  }
+  recordDeckChange(changes.removed, outgoing.card, removed);
+  recordDeckChange(changes.added, incoming, added);
+  return true;
+}
+function addSpecificCard(result, card, amount, changes) {
+  const targetSize = Math.max(result.required, deckCount(result.deck)); let changed = 0;
+  for (let index = 0; index < amount; index++) {
+    if (!canAddToEditedDeck(card, result)) break;
+    if (deckCount(result.deck) < targetSize) {
+      const added = addToDeck(result.deck, card, 1, editorCopyLimit(card, result));
+      if (!added) break;
+      recordDeckChange(changes.added, card, added); changed += added; continue;
+    }
+    const outgoing = chooseOutgoing(result, card, candidate => !cardRole(candidate).land);
+    if (!outgoing || !swapOneCard(result, outgoing, card, changes)) break;
+    changed++;
+  }
+  if (changed < amount) changes.notes.push('Could only add ' + changed + ' of ' + amount + ' requested ' + card.name + ' copies.');
+  return changed;
+}
+function tuneDeck(result, options, changes) {
+  const targetSize = Math.max(result.required, deckCount(result.deck)); let changed = 0;
+  for (let index = 0; index < options.amount; index++) {
+    const candidates = editorCandidates(result, options.incoming).sort((a, b) => options.incomingScore(b, result) - options.incomingScore(a, result));
+    if (!candidates.length) break;
+    if (deckCount(result.deck) < targetSize) {
+      const added = addToDeck(result.deck, candidates[0], 1, editorCopyLimit(candidates[0], result));
+      if (!added) break;
+      recordDeckChange(changes.added, candidates[0], added); changed += added; continue;
+    }
+    let choice = null;
+    for (const incoming of candidates) {
+      const outgoing = chooseOutgoing(result, incoming, options.outgoing, options.outgoingScore);
+      if (outgoing && (!options.canSwap || options.canSwap(outgoing.card, incoming))) { choice = { outgoing, incoming }; break; }
+    }
+    if (!choice || !swapOneCard(result, choice.outgoing, choice.incoming, changes)) break;
+    changed++;
+  }
+  if (changed < options.amount) changes.notes.push('Could only make ' + changed + ' of ' + options.amount + ' ' + options.label.toLowerCase() + ' adjustments with the eligible cards in this collection.');
+  return changed;
+}
+function fillDeck(result, changes) {
+  let added = 0;
+  while (deckCount(result.deck) < result.required) {
+    const needsLand = countDeckLands(result.deck) < result.landTarget;
+    let candidates = editorCandidates(result, card => needsLand ? cardRole(card).land : !cardRole(card).land)
+      .sort((a, b) => (needsLand ? preferredLandOrder(b, result.deckColors) - preferredLandOrder(a, result.deckColors) : styleScore(b, result.style, result.deckColors) - styleScore(a, result.style, result.deckColors)));
+    if (!candidates.length && needsLand) candidates = editorCandidates(result, card => !cardRole(card).land).sort((a, b) => styleScore(b, result.style, result.deckColors) - styleScore(a, result.style, result.deckColors));
+    const card = candidates[0]; if (!card) break;
+    const quantity = addToDeck(result.deck, card, 1, editorCopyLimit(card, result));
+    if (!quantity) break;
+    recordDeckChange(changes.added, card, quantity); added += quantity;
+  }
+  if (deckCount(result.deck) < result.required) changes.notes.push('The deck is still ' + (result.required - deckCount(result.deck)) + ' cards short because no more eligible cards were available.');
+  return added;
+}
+const ASSISTANT_NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+function assistantCount(value, fallback = 1) {
+  const token = String(value || '').toLowerCase();
+  if (token === 'all') return 99;
+  return Math.max(1, Number(token) || ASSISTANT_NUMBER_WORDS[token] || fallback);
+}
+function escapeRegExp(value) { return String(value).replace(/[.*+?^$\{}()|[\]\\]/g, '\\$&'); }
+function amountFor(text, term, fallback) {
+  const count = '(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)';
+  const explicit = new RegExp('\\b' + count + '\\s+(?:more\\s+)?' + term + '\\b', 'i').exec(text);
+  if (explicit) return Math.min(12, assistantCount(explicit[1], fallback));
+  return new RegExp('\\b(?:more|add|increase|extra|need)\\s+' + term + '\\b', 'i').test(text) ? fallback : 0;
+}
+function decreaseAmountFor(text, term, fallback) {
+  const count = '(\\d+|one|two|three|four|five|six|seven|eight|nine|ten|all)';
+  const explicit = new RegExp('\\b(?:remove|cut|reduce)\\s+' + count + '\\s+(?:more\\s+)?' + term + '\\b', 'i').exec(text);
+  if (explicit) return assistantCount(explicit[1], fallback);
+  return new RegExp('\\b(?:fewer|less)\\s+' + term + '\\b', 'i').test(text) ? fallback : 0;
+}
+function namedCardCommands(text, action) {
+  const verbs = action === 'add' ? '(?:add|include|put\\s+in)' : '(?:remove|cut|drop|take\\s+out)';
+  const count = '(all|\\d+|one|two|three|four|five|six|seven|eight|nine|ten)';
+  const boundary = '(?=$|[,.!;]|\\s+(?:and|then|please)\\b)';
+  return collection
+    .slice().sort((a, b) => b.name.length - a.name.length)
+    .map(card => {
+      const pattern = '\\b' + verbs + '\\s+(?:' + count + '\\s*(?:copies?\\s+of\\s+|copies?\\s+|of\\s+)?)?' + escapeRegExp(card.name) + boundary;
+      const match = new RegExp(pattern, 'i').exec(text);
+      return match ? { card, amount: assistantCount(match[1], 1) } : null;
+    }).filter(Boolean);
+}
+function setDeckStyle(result, style, changes) {
+  if (result.style === style) return;
+  changes.style = STYLE_COPY[style][0]; result.style = style; result.landTarget = targetLandCount(result.format, style);
+}
+function planDeckEdit(text) {
+  const draft = cloneDeckResult(currentDeck);
+  const changes = { added: new Map(), removed: new Map(), notes: [], style: '' };
+  const lower = text.toLowerCase(); let recognized = false;
+  const wantsFast = /\b(?:faster|aggressive|aggro|lower (?:the )?(?:mana )?curve|cheaper)\b/.test(lower);
+  const wantsControl = /\b(?:control|controlling)\b/.test(lower);
+  const wantsTokens = /\b(?:tokens?|go wide)\b/.test(lower);
+  const wantsCombo = /\bcombo\b/.test(lower);
+  if (wantsFast) { setDeckStyle(draft, 'aggro', changes); recognized = true; }
+  else if (wantsControl) { setDeckStyle(draft, 'control', changes); recognized = true; }
+  else if (wantsTokens) { setDeckStyle(draft, 'tokens', changes); recognized = true; }
+  else if (wantsCombo) { setDeckStyle(draft, 'combo', changes); recognized = true; }
+
+  namedCardCommands(text, 'remove').forEach(command => {
+    recognized = true;
+    if (sameCard(command.card, draft.commander)) { changes.notes.push('The commander stays in the deck; choose a different commander by generating a new Commander list.'); return; }
+    const removed = removeFromDeck(draft.deck, command.card, command.amount);
+    if (removed) recordDeckChange(changes.removed, command.card, removed);
+    else changes.notes.push(command.card.name + ' is not in the current deck.');
+  });
+  namedCardCommands(text, 'add').forEach(command => {
+    recognized = true;
+    if (!canAddToEditedDeck(command.card, draft)) { changes.notes.push(command.card.name + ' cannot be added: it is unavailable, outside this deck’s colors, over a limit, or not legal for this format.'); return; }
+    addSpecificCard(draft, command.card, command.amount, changes);
+  });
+
+  const moreLands = amountFor(lower, 'lands?', 2);
+  const fewerLands = decreaseAmountFor(lower, 'lands?', 2);
+  const moreRemoval = amountFor(lower, '(?:removal|answers?|interaction)', 2);
+  const moreCreatures = amountFor(lower, 'creatures?', 2);
+  const moreDraw = amountFor(lower, '(?:card draw|draw)', 2);
+  const moreRamp = amountFor(lower, 'ramp', 2);
+  if (moreLands) {
+    recognized = true;
+    tuneDeck(draft, { amount: moreLands, label: 'mana-base', incoming: card => cardRole(card).land, incomingScore: card => preferredLandOrder(card, draft.deckColors), outgoing: card => !cardRole(card).land, outgoingScore: genericRemovalScore }, changes);
+  }
+  if (fewerLands) {
+    recognized = true;
+    tuneDeck(draft, { amount: fewerLands, label: 'fewer-land', incoming: card => !cardRole(card).land, incomingScore: card => styleScore(card, draft.style, draft.deckColors), outgoing: card => cardRole(card).land, outgoingScore: card => 20 - preferredLandOrder(card, draft.deckColors) }, changes);
+  }
+  if (wantsFast) {
+    tuneDeck(draft, { amount: 4, label: 'faster', incoming: card => !cardRole(card).land && cardRole(card).cmc <= 3, incomingScore: card => styleScore(card, 'aggro', draft.deckColors) - cardRole(card).cmc * 3, outgoing: card => !cardRole(card).land, outgoingScore: card => cardRole(card).cmc * 10 - styleScore(card, 'aggro', draft.deckColors), canSwap: (outgoing, incoming) => cardRole(outgoing).cmc > cardRole(incoming).cmc }, changes);
+  }
+  if (moreRemoval) {
+    recognized = true;
+    tuneDeck(draft, { amount: moreRemoval, label: 'removal', incoming: card => cardRole(card).removal, incomingScore: card => styleScore(card, draft.style, draft.deckColors), outgoing: card => !cardRole(card).land && !cardRole(card).removal, outgoingScore: genericRemovalScore }, changes);
+  }
+  if (moreCreatures) {
+    recognized = true;
+    tuneDeck(draft, { amount: moreCreatures, label: 'creature', incoming: card => cardRole(card).creature, incomingScore: card => styleScore(card, draft.style, draft.deckColors), outgoing: card => !cardRole(card).land && !cardRole(card).creature, outgoingScore: genericRemovalScore }, changes);
+  }
+  if (moreDraw) {
+    recognized = true;
+    tuneDeck(draft, { amount: moreDraw, label: 'card-draw', incoming: card => cardRole(card).draw, incomingScore: card => styleScore(card, draft.style, draft.deckColors), outgoing: card => !cardRole(card).land && !cardRole(card).draw, outgoingScore: genericRemovalScore }, changes);
+  }
+  if (moreRamp) {
+    recognized = true;
+    tuneDeck(draft, { amount: moreRamp, label: 'ramp', incoming: card => cardRole(card).ramp, incomingScore: card => styleScore(card, 'ramp', draft.deckColors), outgoing: card => !cardRole(card).land && !cardRole(card).ramp, outgoingScore: genericRemovalScore }, changes);
+  }
+  if (wantsControl) {
+    tuneDeck(draft, { amount: 3, label: 'control', incoming: card => { const role = cardRole(card); return role.removal || role.counter || role.draw || role.sweeper; }, incomingScore: card => styleScore(card, 'control', draft.deckColors), outgoing: card => { const role = cardRole(card); return !role.land && !(role.removal || role.counter || role.draw || role.sweeper); }, outgoingScore: genericRemovalScore }, changes);
+  }
+  if (wantsTokens) {
+    tuneDeck(draft, { amount: 3, label: 'token', incoming: card => { const role = cardRole(card); return role.token || role.payoff; }, incomingScore: card => styleScore(card, 'tokens', draft.deckColors), outgoing: card => { const role = cardRole(card); return !role.land && !(role.token || role.payoff); }, outgoingScore: genericRemovalScore }, changes);
+  }
+  if (wantsCombo) {
+    tuneDeck(draft, { amount: 3, label: 'combo', incoming: card => { const role = cardRole(card); return role.combo || role.draw || role.ramp; }, incomingScore: card => styleScore(card, 'combo', draft.deckColors), outgoing: card => { const role = cardRole(card); return !role.land && !(role.combo || role.draw || role.ramp); }, outgoingScore: genericRemovalScore }, changes);
+  }
+  if (/\b(?:fill|complete)\b.*\b(?:deck|list)\b|\b(?:make|keep)\b.*\b(?:60|100|legal)\b/.test(lower)) { recognized = true; fillDeck(draft, changes); }
+
+  draft.landsAdded = countDeckLands(draft.deck);
+  draft.landTarget = targetLandCount(draft.format, draft.style);
+  draft.report = validateDeck(draft);
+  return { recognized, draft, changes };
+}
+function hasPlannedChanges(changes) { return Boolean(changes.style || changes.added.size || changes.removed.size); }
+function clearDeckEditPreview() {
+  pendingDeckEdit = null; els.assistantPreview.classList.add('hidden'); els.assistantPreviewText.innerHTML = ''; els.applyDeckEditButton.disabled = true;
+}
+function renderDeckEditPreview(plan) {
+  const rows = [];
+  if (plan.changes.style) rows.push('<li><b>Plan:</b><span>Shift the deck toward <em>' + escapeHtml(plan.changes.style) + '</em>.</span></li>');
+  if (plan.changes.added.size) rows.push('<li><b>Adding:</b><span><em>' + changeText(plan.changes.added) + '</em></span></li>');
+  if (plan.changes.removed.size) rows.push('<li><b>Removing:</b><span class="preview-cut">' + changeText(plan.changes.removed) + '</span></li>');
+  plan.changes.notes.forEach(note => rows.push('<li><b>Note:</b><span class="preview-note">' + escapeHtml(note) + '</span></li>'));
+  const failures = plan.draft.report.filter(item => item.type === 'fail').map(item => item.title);
+  const status = failures.length ? 'Rules check will flag: ' + failures.join(', ') + '.' : 'All current hard rules checks remain clear.';
+  rows.push('<li><b>After:</b><span>' + deckCount(plan.draft.deck) + ' cards · ' + countDeckLands(plan.draft.deck) + ' lands · ' + escapeHtml(status) + '</span></li>');
+  els.assistantPreviewText.innerHTML = '<ul class="assistant-preview-list">' + rows.join('') + '</ul>';
+  els.assistantPreview.classList.remove('hidden'); els.applyDeckEditButton.disabled = false;
+}
+function reviewDeckEdit() {
+  if (!currentDeck) { els.assistantMessage.textContent = 'Generate a deck first, then ask Deckforge to tune it.'; return; }
+  const request = els.assistantInput.value.trim();
+  if (!request) { els.assistantMessage.textContent = 'Describe a change first—try “make it faster” or “add more removal.”'; return; }
+  const plan = planDeckEdit(request);
+  if (!plan.recognized) {
+    clearDeckEditPreview();
+    els.assistantMessage.textContent = 'I can help with a faster or controlling plan, more lands/removal/creatures/draw/ramp, filling the deck, or “add/remove 2 Card Name.”';
+    return;
+  }
+  if (!hasPlannedChanges(plan.changes)) {
+    clearDeckEditPreview();
+    els.assistantMessage.textContent = plan.changes.notes[0] || 'No eligible change was available from the cards you recorded.';
+    return;
+  }
+  pendingDeckEdit = plan; renderDeckEditPreview(plan);
+  els.assistantMessage.textContent = 'Review the exact changes below, then apply them when they look right.';
+}
+function applyDeckEdit() {
+  if (!pendingDeckEdit || !currentDeck) return;
+  previousDeck = cloneDeckResult(currentDeck);
+  currentDeck = pendingDeckEdit.draft; clearDeckEditPreview(); persistDeck();
+  renderDeck(currentDeck, { scroll: false });
+  els.assistantInput.value = '';
+  els.assistantMessage.textContent = 'Deck updated. The list, mana curve, rules check, copy, and download now use this edited deck.';
+  els.undoDeckEditButton.classList.remove('hidden');
+}
+function undoDeckEdit() {
+  if (!previousDeck) return;
+  currentDeck = cloneDeckResult(previousDeck); previousDeck = null; clearDeckEditPreview(); persistDeck();
+  renderDeck(currentDeck, { scroll: false });
+  els.assistantMessage.textContent = 'Last deck edit undone.';
+  els.undoDeckEditButton.classList.add('hidden');
 }
 
 function validateDeck(result) {
@@ -195,6 +491,13 @@ function validateDeck(result) {
   items.push({ type: lands >= Math.max(18, landTarget - 3) ? 'pass' : 'warn', title: 'Mana base', text: `${lands} lands included; the plan targets about ${landTarget}. ${lands < landTarget ? 'More owned lands would make the deck more consistent.' : 'The land count supports this plan.'}` });
   const tooMany = deck.filter(entry => entry.count > (isCommander ? 1 : 4) && !isBasicLand(entry.card));
   items.push({ type: tooMany.length ? 'fail' : 'pass', title: 'Copy limit', text: tooMany.length ? `${tooMany.map(entry => entry.card.name).join(', ')} exceeds the normal copy limit.` : isCommander ? 'Every non-basic card appears no more than once.' : 'No non-basic card exceeds four copies.' });
+  if (result.strictOwned) {
+    const unavailable = deck.filter(entry => {
+      const owned = collection.find(card => sameCard(card, entry.card));
+      return !owned || entry.count > Number(owned.quantity || 0);
+    });
+    items.push({ type: unavailable.length ? 'fail' : 'pass', title: 'Owned quantities', text: unavailable.length ? unavailable.map(entry => entry.card.name).join(', ') + ' exceeds the quantities currently recorded in your collection.' : 'Every card count stays within the quantities you recorded.' });
+  }
   if (isCommander) {
     const identityIssue = deck.filter(entry => !meetsColors(entry.card, deckColors));
     items.push({ type: identityIssue.length || !isCommanderCandidate(commander) ? 'fail' : 'pass', title: 'Commander identity', text: identityIssue.length ? `${identityIssue.map(entry => entry.card.name).join(', ')} sits outside ${commander.name}'s color identity.` : `${commander.name} leads a color-identity compliant list.` });
@@ -210,7 +513,7 @@ function validateDeck(result) {
   return items;
 }
 
-function renderDeck(result) {
+function renderDeck(result, { scroll = true } = {}) {
   els.emptyDeck.classList.add('hidden'); els.deckResult.classList.remove('hidden');
   const total = deckCount(result.deck); const [planTitle, planText] = STYLE_COPY[result.style];
   els.deckTitle.textContent = result.commander ? `${result.commander.name} ${result.style === 'balanced' ? 'good-stuff' : result.style} deck` : `${FORMAT_LABELS[result.format]} ${result.style} deck`;
@@ -218,7 +521,9 @@ function renderDeck(result) {
   els.deckTotal.textContent = total; els.planTitle.textContent = planTitle; els.planText.textContent = planText;
   els.deckColorDots.innerHTML = [...result.deckColors].map(color => `<i>${color}</i>`).join('') || '<i>◇</i>';
   renderDeckList(result.deck); renderManaCurve(result.deck); renderRules(result.report);
-  $('#deckOutput').scrollIntoView({ behavior:'smooth', block:'start' });
+  els.format.value = result.format; els.style.value = result.style;
+  els.undoDeckEditButton.classList.toggle('hidden', !previousDeck);
+  if (scroll) $('#deckOutput').scrollIntoView({ behavior:'smooth', block:'start' });
 }
 function groupForCard(card) { const role = cardRole(card); if (role.land) return 'Lands'; if (role.creature) return 'Creatures'; if (role.planeswalker) return 'Planeswalkers'; if (role.instant) return 'Instants'; if (role.sorcery) return 'Sorceries'; if (role.artifact) return 'Artifacts'; return 'Other spells'; }
 function renderDeckList(deck) {
@@ -306,16 +611,35 @@ function loadExample() {
   if (collection.length && !confirm('Replace your current collection with a demo collection?')) return;
   collection = [
     makeExampleCard('Forest',22,'Basic Land — Forest',0,['G'],'({T}: Add {G}.)',''), makeExampleCard('Llanowar Elves',4,'Creature — Elf Druid',1,['G'],'{T}: Add {G}.','{G}'), makeExampleCard('Elvish Mystic',4,'Creature — Elf Druid',1,['G'],'{T}: Add {G}.','{G}'), makeExampleCard('Wildwood Tracker',4,'Creature — Elf Warrior',1,['G'],'Whenever Wildwood Tracker attacks or blocks, if you control another non-Human creature, it gets +1/+1 until end of turn.','{G}'), makeExampleCard('Leafkin Druid',3,'Creature — Elemental Druid',2,['G'],'{T}: Add {G}.','{1}{G}'), makeExampleCard('Beast Whisperer',3,'Creature — Elf Druid',4,['G'],'Whenever you cast a creature spell, you may draw a card.','{2}{G}{G}'), makeExampleCard('Steel Leaf Champion',4,'Creature — Elf Knight',3,['G'],'Steel Leaf Champion cannot be blocked by creatures with power 2 or less.','{G}{G}{G}'), makeExampleCard('Garruks Uprising',2,'Enchantment',3,['G'],'When Garruks Uprising enters the battlefield, if you control a creature with power 4 or greater, draw a card. Creature spells you control have trample.','{2}{G}'), makeExampleCard('Questing Beast',2,'Legendary Creature — Beast',4,['G'],'Vigilance, deathtouch, haste.','{2}{G}{G}'), makeExampleCard('Overrun',2,'Sorcery',5,['G'],'Creatures you control get +3/+3 and gain trample until end of turn.','{2}{G}{G}{G}'), makeExampleCard('Return to Nature',2,'Instant',2,['G'],'Choose one — Destroy target artifact; destroy target enchantment; or exile target card from a graveyard.','{1}{G}')
-  ]; persist(); renderCollection();
+  ]; currentDeck = null; previousDeck = null; clearDeckEditPreview(); persist(); persistDeck(); renderCollection();
 }
 
 // Events
 $('#openImportButton').addEventListener('click', openImport); $('#emptyImportButton').addEventListener('click', openImport); $('#collectionImportButton').addEventListener('click', openImport);
 $('#importListButton').addEventListener('click', importList); $('#arenaImportButton').addEventListener('click', importArenaDeck); $('#addSingleButton').addEventListener('click', async () => { const name = $('#singleCardName').value.trim(); const qty = Math.max(1, Number($('#singleQuantity').value || 1)); if (!name) { els.singleMessage.textContent = 'Enter a card name.'; return; } try { $('#addSingleButton').disabled = true; await addNamedCard(name, qty, els.singleMessage); persist(); renderCollection(); $('#singleCardName').value = ''; } catch (error) { els.singleMessage.textContent = error.message; } finally { $('#addSingleButton').disabled = false; } });
 $$('.import-tab').forEach(tab => tab.addEventListener('click', () => { $$('.import-tab').forEach(button => button.classList.toggle('active', button === tab)); $$('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.id === `${tab.dataset.tab}Panel`)); }));
-$('#exampleButton').addEventListener('click', loadExample); $('#clearCollectionButton').addEventListener('click', () => { if (collection.length && confirm('Clear every card from this local collection?')) { collection = []; currentDeck = null; persist(); renderCollection(); els.deckResult.classList.add('hidden'); els.emptyDeck.classList.remove('hidden'); } });
+$('#exampleButton').addEventListener('click', loadExample); $('#clearCollectionButton').addEventListener('click', () => { if (collection.length && confirm('Clear every card from this local collection?')) { collection = []; currentDeck = null; previousDeck = null; clearDeckEditPreview(); persist(); persistDeck(); renderCollection(); els.deckResult.classList.add('hidden'); els.emptyDeck.classList.remove('hidden'); } });
 els.collectionSearch.addEventListener('input', renderCollection); $$('#colorPips button').forEach(button => button.addEventListener('click', () => { const color = button.dataset.color; selectedColors.has(color) ? selectedColors.delete(color) : selectedColors.add(color); button.classList.toggle('selected', selectedColors.has(color)); }));
 els.format.addEventListener('change', () => { const isCommander = els.format.value === 'commander'; $$('.commander-only').forEach(el => el.style.display = isCommander ? 'block' : 'none'); $$('.noncommander-only').forEach(el => el.style.display = isCommander ? 'none' : 'block'); });
 $('#generateButton').addEventListener('click', generateDeck); $('#copyDeckButton').addEventListener('click', copyDeck); $('#exportDeckButton').addEventListener('click', exportDeck); $('#viewRulesButton').addEventListener('click', () => els.rulesDialog.showModal());
+els.reviewDeckEditButton.addEventListener('click', reviewDeckEdit); els.applyDeckEditButton.addEventListener('click', applyDeckEdit); els.discardDeckEditButton.addEventListener('click', () => { clearDeckEditPreview(); els.assistantMessage.textContent = 'No changes were made.'; }); els.undoDeckEditButton.addEventListener('click', undoDeckEdit);
+els.assistantInput.addEventListener('input', () => { if (pendingDeckEdit) { clearDeckEditPreview(); els.assistantMessage.textContent = 'Your request changed—review the new version before applying it.'; } });
+els.assistantInput.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') reviewDeckEdit(); });
+$$('[data-assistant-prompt]').forEach(button => button.addEventListener('click', () => { els.assistantInput.value = button.dataset.assistantPrompt; els.assistantInput.focus(); }));
 
-renderCollection(); els.format.dispatchEvent(new Event('change'));
+renderCollection();
+if (currentDeck?.deck?.length) {
+  currentDeck.format = FORMAT_LABELS[currentDeck.format] ? currentDeck.format : 'casual';
+  currentDeck.style = STYLE_COPY[currentDeck.style] ? currentDeck.style : 'balanced';
+  currentDeck.required = currentDeck.format === 'commander' ? 100 : 60;
+  currentDeck.deckColors = new Set(currentDeck.deckColors || []);
+  currentDeck.landTarget = targetLandCount(currentDeck.format, currentDeck.style);
+  currentDeck.landsAdded = countDeckLands(currentDeck.deck);
+  els.format.value = currentDeck.format; els.style.value = currentDeck.style;
+  els.format.dispatchEvent(new Event('change'));
+  if (currentDeck.commander) els.commander.value = currentDeck.commander.id;
+  currentDeck.report = validateDeck(currentDeck); persistDeck();
+  renderDeck(currentDeck, { scroll: false });
+} else {
+  currentDeck = null; persistDeck(); els.format.dispatchEvent(new Event('change'));
+}

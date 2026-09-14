@@ -122,6 +122,32 @@
               </div>
               <div class="deck-actions"><button class="text-button" id="copyDeckButton">Copy list</button><button class="secondary-button" id="exportDeckButton">Download .txt</button></div>
             </div>
+            <article class="deck-assistant-card" aria-labelledby="deckAssistantTitle">
+              <div class="deck-assistant-heading">
+                <div>
+                  <p class="eyebrow gold">DECK ASSISTANT</p>
+                  <h4 id="deckAssistantTitle">Tell Deckforge what to change.</h4>
+                </div>
+                <p>It tunes the deck already on screen using only cards you recorded, then rechecks the rules before you apply anything.</p>
+              </div>
+              <label class="assistant-label" for="deckAssistantInput">WHAT SHOULD CHANGE?</label>
+              <div class="assistant-input-row">
+                <textarea id="deckAssistantInput" rows="2" placeholder="e.g. Make it faster and add more removal"></textarea>
+                <button class="primary-button" id="reviewDeckEditButton" type="button">Review change <span>→</span></button>
+              </div>
+              <div class="assistant-examples" aria-label="Deck Assistant examples">
+                <button type="button" data-assistant-prompt="Make it faster">Make it faster</button>
+                <button type="button" data-assistant-prompt="Add more removal">Add more removal</button>
+                <button type="button" data-assistant-prompt="Add 2 more lands">Add 2 more lands</button>
+                <span>or type “Add 2 Card Name”</span>
+              </div>
+              <div class="assistant-preview hidden" id="deckAssistantPreview" aria-live="polite">
+                <p class="eyebrow">PROPOSED UPDATE</p>
+                <div id="deckAssistantPreviewText"></div>
+                <div class="assistant-preview-actions"><button class="text-button" id="discardDeckEditButton" type="button">Dismiss</button><button class="secondary-button" id="applyDeckEditButton" type="button">Apply change →</button></div>
+              </div>
+              <div class="assistant-foot"><span id="deckAssistantMessage" aria-live="polite">Try a strategy change, a card name, or a mana adjustment.</span><button class="text-button hidden" id="undoDeckEditButton" type="button">Undo last edit</button></div>
+            </article>
             <div class="result-grid">
               <article class="deck-list-card">
                 <div class="deck-list-summary"><strong id="deckTotal">0</strong><span>cards in main deck</span><div id="deckColorDots" class="deck-colors"></div></div>
