@@ -537,7 +537,10 @@ function renderRules(report) { els.rulesStatus.innerHTML = report.slice(0,4).map
 async function lookupCard(name) {
   const response = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}`);
   if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.details || `Could not find “${name}”.`); }
-  const data = await response.json(); const face = data.card_faces?.[0] || data;
+  return cardFromScryfall(await response.json());
+}
+function cardFromScryfall(data) {
+  const face = data.card_faces?.[0] || data;
   return { id: data.id || `manual-${normalizeName(data.name)}`, name: data.name, quantity: 0, manaCost: data.mana_cost || face.mana_cost || '', cmc: data.cmc || 0, colorIdentity: data.color_identity || [], typeLine: data.type_line || face.type_line || '', oracleText: data.oracle_text || data.card_faces?.map(f => f.oracle_text || '').join(' // ') || '', legalities: data.legalities || null, imageUri: data.image_uris?.small || face.image_uris?.small || '', rarity: data.rarity || '' };
 }
 function mergeCard(incoming, quantity, mode = 'add') {
@@ -606,80 +609,142 @@ function copyDeck() { if (!currentDeck) return; navigator.clipboard?.writeText(d
 function decklistText() { const lines = []; if (currentDeck.commander) lines.push(`Commander\n1 ${currentDeck.commander.name}\n`); const groups = {}; currentDeck.deck.filter(entry => entry.card.id !== currentDeck.commander?.id).forEach(entry => (groups[groupForCard(entry.card)] ||= []).push(entry)); ['Creatures','Planeswalkers','Instants','Sorceries','Artifacts','Other spells','Lands'].forEach(group => { if (groups[group]) { lines.push(group); groups[group].sort((a,b)=>a.card.name.localeCompare(b.card.name)).forEach(entry => lines.push(`${entry.count} ${entry.card.name}`)); lines.push(''); } }); return lines.join('\n').trim(); }
 function exportDeck() { if (!currentDeck) return; const blob = new Blob([decklistText()], { type:'text/plain' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'deckforge-decklist.txt'; a.click(); URL.revokeObjectURL(a.href); }
 
-function makeExampleCard(name, quantity, typeLine, cmc, identity, text, manaCost) { return { id:`sample-${name.toLowerCase().replace(/[^a-z0-9]+/g,'-')}`,name,quantity,typeLine,cmc,colorIdentity:identity,oracleText:text,manaCost,legalities:null,imageUri:'' }; }
-function makeExampleCollection() {
-  // The demo collection is intentionally Commander-ready: a five-color leader,
-  // enough singleton spells to show a real deck, and basics in every color.
-  const basics = [
-    ['Plains',16,'Basic Land — Plains',0,['W'],'({T}: Add {W}.)',''],
-    ['Island',16,'Basic Land — Island',0,['U'],'({T}: Add {U}.)',''],
-    ['Swamp',16,'Basic Land — Swamp',0,['B'],'({T}: Add {B}.)',''],
-    ['Mountain',16,'Basic Land — Mountain',0,['R'],'({T}: Add {R}.)',''],
-    ['Forest',16,'Basic Land — Forest',0,['G'],'({T}: Add {G}.)','']
-  ];
-  const utilityLands = [
-    ['Command Tower',1,'Land',0,[],'{T}: Add one mana of any color in your commander’s color identity.',''],
-    ['Exotic Orchard',1,'Land',0,[],'{T}: Add one mana of any color that a land an opponent controls could produce.',''],
-    ['Path of Ancestry',1,'Land',0,[],'{T}: Add one mana of any color in your commander’s color identity.',''],
-    ['Terramorphic Expanse',1,'Land',0,[],'{T}, Sacrifice Terramorphic Expanse: Search your library for a basic land card.',''],
-    ['Evolving Wilds',1,'Land',0,[],'{T}, Sacrifice Evolving Wilds: Search your library for a basic land card.','']
-  ];
-  const cards = [
-    ['Kenrith, the Returned King',1,'Legendary Creature — Human Noble',5,['W','U','B','R','G'],'{R}: All creatures gain trample and haste until end of turn. {G}: Put a +1/+1 counter on target creature. {W}: Target player gains 5 life. {U}: Target player draws a card. {B}: Put target creature card from a graveyard onto the battlefield under its owner’s control.','{4}{W}'],
-    ['Arcane Signet',1,'Artifact',2,[],'{T}: Add one mana of any color in your commander’s color identity.','{2}'],
-    ['Sol Ring',1,'Artifact',1,[],'{T}: Add {C}{C}.','{1}'],
-    ['Commanders Sphere',1,'Artifact',3,[],'{T}: Add one mana of any color in your commander’s color identity. Sacrifice Commanders Sphere: Draw a card.','{3}'],
-    ['Swiftfoot Boots',1,'Artifact — Equipment',2,[],'Equipped creature has hexproof and haste. Equip {1}.','{2}'],
-    ['Skullclamp',1,'Artifact — Equipment',1,[],'Equipped creature gets +1/-1. When equipped creature dies, draw two cards. Equip {1}.','{1}'],
-    ['Llanowar Elves',1,'Creature — Elf Druid',1,['G'],'{T}: Add {G}.','{G}'],
-    ['Birds of Paradise',1,'Creature — Bird',1,['G'],'Flying. {T}: Add one mana of any color.','{G}'],
-    ['Sakura-Tribe Elder',1,'Creature — Snake Shaman',2,['G'],'Sacrifice Sakura-Tribe Elder: Search your library for a basic land card and put it onto the battlefield tapped.','{1}{G}'],
-    ['Cultivate',1,'Sorcery',3,['G'],'Search your library for up to two basic land cards. Put one onto the battlefield tapped and the other into your hand.','{2}{G}'],
-    ['Kodamas Reach',1,'Sorcery',3,['G'],'Search your library for up to two basic land cards. Put one onto the battlefield tapped and the other into your hand.','{2}{G}'],
-    ['Farseek',1,'Sorcery',2,['G'],'Search your library for a Plains, Island, Swamp, or Mountain card and put it onto the battlefield tapped.','{1}{G}'],
-    ['Tireless Provisioner',1,'Creature — Elf Scout',3,['G'],'Whenever a land enters the battlefield under your control, create a Food or Treasure token.','{2}{G}'],
-    ['Beast Within',1,'Instant',3,['G'],'Destroy target permanent. Its controller creates a 3/3 green Beast creature token.','{2}{G}'],
-    ['Heroic Intervention',1,'Instant',2,['G'],'Permanents you control gain hexproof and indestructible until end of turn.','{1}{G}'],
-    ['Eternal Witness',1,'Creature — Human Shaman',3,['G'],'When Eternal Witness enters the battlefield, you may return target card from your graveyard to your hand.','{1}{1}{G}'],
-    ['Swords to Plowshares',1,'Instant',1,['W'],'Exile target creature. Its controller gains life equal to its power.','{W}'],
-    ['Generous Gift',1,'Instant',3,['W'],'Destroy target permanent. Its controller creates a 3/3 green Elephant creature token.','{2}{W}'],
-    ['Farewell',1,'Sorcery',6,['W'],'Choose one or more — Exile all artifacts, all creatures, all enchantments, and/or all graveyards.','{4}{W}{W}'],
-    ['Soul Warden',1,'Creature — Human Cleric',1,['W'],'Whenever another creature enters the battlefield, you gain 1 life.','{W}'],
-    ['Counterspell',1,'Instant',2,['U'],'Counter target spell.','{U}{U}'],
-    ['Ponder',1,'Sorcery',1,['U'],'Look at the top three cards of your library, then put them back in any order. You may shuffle. Draw a card.','{U}'],
-    ['Mulldrifter',1,'Creature — Elemental',5,['U'],'Flying. When Mulldrifter enters the battlefield, draw two cards.','{4}{U}'],
-    ['Baleful Strix',1,'Artifact Creature — Bird',2,['U','B'],'Flying, deathtouch. When Baleful Strix enters the battlefield, draw a card.','{U}{B}'],
-    ['Fact or Fiction',1,'Instant',4,['U'],'Reveal the top five cards of your library. An opponent separates them into two piles. Put one pile into your hand and the other into your graveyard.','{3}{U}'],
-    ['Read the Bones',1,'Sorcery',3,['B'],'Scry 2, then draw two cards. You lose 2 life.','{2}{B}'],
-    ['Go for the Throat',1,'Instant',2,['B'],'Destroy target nonartifact creature.','{1}{B}'],
-    ['Crux of Fate',1,'Sorcery',5,['B'],'Choose one — Destroy all Dragon creatures, or destroy all non-Dragon creatures.','{3}{B}{B}'],
-    ['Terminate',1,'Instant',2,['B','R'],'Destroy target creature. It can’t be regenerated.','{B}{R}'],
-    ['Chaos Warp',1,'Instant',3,['R'],'The owner of target permanent shuffles it into their library, then reveals the top card. If it is a permanent card, they put it onto the battlefield.','{2}{R}'],
-    ['Lightning Bolt',1,'Instant',1,['R'],'Lightning Bolt deals 3 damage to any target.','{R}'],
-    ['Blasphemous Act',1,'Sorcery',9,['R'],'Blasphemous Act costs {1} less to cast for each creature on the battlefield. It deals 13 damage to each creature.','{8}{R}'],
-    ['Austere Command',1,'Sorcery',6,['W'],'Choose two — Destroy all artifacts; destroy all enchantments; destroy all creatures with mana value 3 or less; or destroy all creatures with mana value 4 or greater.','{4}{W}{W}'],
-    ['Solemn Simulacrum',1,'Artifact Creature — Golem',4,[],'When Solemn Simulacrum enters the battlefield, you may search your library for a basic land card and put it onto the battlefield tapped. When it dies, you may draw a card.','{4}'],
-    ['Talisman of Dominance',1,'Artifact',2,[],'{T}: Add {C}. {T}: Add {U} or {B}. Talisman of Dominance deals 1 damage to you when tapped for colored mana.','{2}'],
-    ['Talisman of Impulse',1,'Artifact',2,[],'{T}: Add {C}. {T}: Add {R} or {G}. Talisman of Impulse deals 1 damage to you when tapped for colored mana.','{2}'],
-    ['Beast Whisperer',1,'Creature — Elf Druid',4,['G'],'Whenever you cast a creature spell, draw a card.','{2}{G}{G}'],
-    ['Sun Titan',1,'Creature — Giant',6,['W'],'Whenever Sun Titan enters the battlefield or attacks, return target permanent card with mana value 3 or less from your graveyard to the battlefield.','{4}{W}{W}'],
-    ['Putrefy',1,'Instant',3,['B','G'],'Destroy target artifact or creature. It can’t be regenerated.','{1}{B}{G}'],
-    ['Merciless Eviction',1,'Sorcery',6,['W','B'],'Choose one — Exile all artifacts, all creatures, all enchantments, or all planeswalkers.','{4}{W}{B}'],
-    ['Deepglow Skate',1,'Creature — Fish',4,['U'],'When Deepglow Skate enters the battlefield, double the number of each kind of counter on any number of target permanents.','{3}{U}'],
-    ['Vandalblast',1,'Sorcery',1,['R'],'Destroy target artifact you don’t control. Overload {4}{R}.','{R}'],
-    ['Krosan Grip',1,'Instant',3,['G'],'Split second. Destroy target artifact or enchantment.','{2}{G}'],
-    ['Mortify',1,'Instant',3,['W','B'],'Destroy target creature or enchantment.','{1}{W}{B}'],
-    ['Sphinx Revelation',1,'Instant',3,['W','U'],'You gain X life and draw X cards.','{X}{W}{U}'],
-    ['Anguished Unmaking',1,'Instant',3,['W','B'],'Exile target nonland permanent. You lose 3 life.','{1}{W}{B}']
-  ];
-  return [...basics, ...utilityLands, ...cards].map(spec => makeExampleCard(...spec));
+// Examples use fresh metadata instead of a Commander-only, unverified card list.
+const EXAMPLE_PLANS = {
+  balanced: { colors: ['G','W'], commander: 'Shalai, Voice of Plenty', query: '(t:creature mv>=2 mv<=5)' },
+  aggro: { colors: ['R'], commander: 'Krenko, Tin Street Kingpin', query: '(t:creature mv<=3)' },
+  midrange: { colors: ['B','G'], commander: 'Meren of Clan Nel Toth', query: '(t:creature mv>=3 mv<=5)' },
+  control: { colors: ['U','B'], commander: 'Talrand, Sky Summoner', query: '(o:"counter target" or o:"destroy target" or o:"draw")' },
+  ramp: { colors: ['G'], commander: 'Goreclaw, Terror of Qal Sisma', query: '(o:"add {" or o:"search your library" or (t:creature mv>=5))' },
+  tokens: { colors: ['G','W'], commander: 'Rhys the Redeemed', query: '(o:"create" o:"token")' },
+  combo: { colors: ['U','R'], commander: 'Veyran, Voice of Duality', query: '(o:"copy" or o:"draw" or o:"whenever you cast")' }
+};
+let exampleLoading = false;
+function updateExampleButton() {
+  const button = $('#exampleButton');
+  button.textContent = exampleLoading ? 'Building example…' : 'Build ' + FORMAT_LABELS[els.format.value] + ' ' + els.style.value + ' example';
+  button.disabled = exampleLoading;
 }
-function loadExample() {
-  if (collection.length && !confirm('Replace your current collection with a demo collection?')) return;
-  collection = makeExampleCollection(); currentDeck = null; previousDeck = null; clearDeckEditPreview(); persist(); persistDeck(); renderCollection();
+function exampleMessage(message) {
+  let status = $('#exampleStatus');
+  if (!status) {
+    status = document.createElement('p');
+    status.id = 'exampleStatus';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.style.cssText = 'font-size:0.8rem;line-height:1.5;margin-top:0.75rem';
+    $('#exampleButton').after(status);
+  }
+  status.textContent = message;
+}
+async function exampleRequest(path, allowEmpty = false) {
+  // Keep requests sequential and below Scryfall's rate limit.
+  await new Promise(resolve => setTimeout(resolve, 125));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch('https://api.scryfall.com/cards/' + path, { signal: controller.signal });
+    if (allowEmpty && response.status === 404) return { data: [] };
+    if (!response.ok) throw new Error('Card lookup failed (' + response.status + '). Please try again.');
+    return await response.json();
+  } finally { clearTimeout(timeout); }
+}
+async function exampleSearch(query) {
+  const result = await exampleRequest('search?' + new URLSearchParams({ q: query, unique: 'cards', order: 'edhrec' }), true);
+  if (!Array.isArray(result.data)) throw new Error('The card service returned an incomplete result.');
+  return result.data.map(cardFromScryfall);
+}
+function exampleSpellScore(card, style, colors) {
+  const role = cardRole(card);
+  let score = styleScore(card, style, colors);
+  // Avoid filling an example with expensive cards or narrow text-only matches.
+  if (style !== 'ramp' && role.cmc > 5) score -= (role.cmc - 5) * 8;
+  if (role.cmc === 0) score -= 8;
+  if (style === 'aggro' && role.creature && role.cmc <= 3) score += 30;
+  if (style === 'tokens' && role.token) score += 30;
+  return score;
+}
+function assembleExample(format, style, commander, pool, basics) {
+  const colors = new Set(commander ? commander.colorIdentity : EXAMPLE_PLANS[style].colors);
+  const legalityFormat = format === 'casual' ? 'modern' : format;
+  const eligible = card => card.legalities?.[legalityFormat] === 'legal' && meetsColors(card, colors);
+  const unique = new Map();
+  for (const card of pool) {
+    if (eligible(card) && !cardRole(card).land && !sameCard(card, commander)) unique.set(normalizeName(card.name), card);
+  }
+  const spells = [...unique.values()].sort((a,b) => exampleSpellScore(b, style, colors) - exampleSpellScore(a, style, colors) || a.name.localeCompare(b.name));
+  const landCount = targetLandCount(format, style);
+  let remaining = (format === 'commander' ? 99 : 60) - landCount;
+  const cards = commander ? [{ ...commander, quantity: 1 }] : [];
+  for (const card of spells) {
+    if (!remaining) break;
+    const quantity = Math.min(remaining, format === 'commander' ? 1 : 4);
+    cards.push({ ...card, quantity });
+    remaining -= quantity;
+  }
+  if (remaining) throw new Error('Not enough matching legal cards were found. Your current collection was kept.');
+  // Reserve a balanced set of basics, weighted by the spells' colored mana costs.
+  const neededColors = [...colors];
+  const weights = neededColors.map(color => cards.reduce((sum, card) => sum + card.quantity * (card.manaCost.match(new RegExp(color, 'g')) || []).length, 0) + 1);
+  const quantities = neededColors.map(() => Math.min(5, Math.floor(landCount / neededColors.length)));
+  while (quantities.reduce((sum, n) => sum + n, 0) < landCount) {
+    let best = 0;
+    for (let i = 1; i < weights.length; i++) if (weights[i] / (quantities[i] + 1) > weights[best] / (quantities[best] + 1)) best = i;
+    quantities[best]++;
+  }
+  neededColors.forEach((color, index) => {
+    const names = { W:'Plains', U:'Island', B:'Swamp', R:'Mountain', G:'Forest' };
+    const basic = basics.find(card => card.name === names[color] && eligible(card) && isBasicLand(card));
+    if (!basic) throw new Error('Could not verify the example mana base. Please try again.');
+    cards.push({ ...basic, quantity: quantities[index] });
+  });
+  return { cards, commander, colors };
+}
+async function makeExampleCollection(format, style) {
+  const plan = EXAMPLE_PLANS[style];
+  const legalityFormat = format === 'casual' ? 'modern' : format;
+  let commander = null;
+  if (format === 'commander') {
+    commander = cardFromScryfall(await exampleRequest('named?exact=' + encodeURIComponent(plan.commander)));
+    if (!isCommanderCandidate(commander) || commander.legalities?.commander !== 'legal') throw new Error('The example commander is not currently legal.');
+  }
+  const colors = commander ? commander.colorIdentity : plan.colors;
+  const base = 'game:paper legal:' + legalityFormat + ' id<=' + colors.join('').toLowerCase();
+  const themed = await exampleSearch(base + ' -t:land ' + plan.query);
+  const support = await exampleSearch(base + ' -t:land');
+  const basics = await exampleSearch('game:paper legal:' + legalityFormat + ' t:basic (name:Plains or name:Island or name:Swamp or name:Mountain or name:Forest)');
+  return assembleExample(format, style, commander, [...themed, ...support], basics);
+}
+async function loadExample() {
+  if (exampleLoading) return;
+  const format = els.format.value, style = els.style.value;
+  if (collection.length && !confirm('Replace your collection and current deck with a ' + FORMAT_LABELS[format] + ' ' + style + ' example? Export anything you want to keep first.')) return;
+  const beforeCollection = JSON.stringify(collection), beforeDeck = JSON.stringify(currentDeck);
+  exampleLoading = true; updateExampleButton();
+  exampleMessage('Finding legal cards for your format and playstyle… Internet access is required.');
+  try {
+    const example = await makeExampleCollection(format, style);
+    if (format !== els.format.value || style !== els.style.value || beforeCollection !== JSON.stringify(collection) || beforeDeck !== JSON.stringify(currentDeck)) {
+      exampleMessage('Your settings or cards changed while loading. Nothing was replaced; click the example button again.');
+      return;
+    }
+    collection = example.cards; currentDeck = null; previousDeck = null;
+    selectedColors = new Set(example.colors);
+    $$('#colorPips button').forEach(button => button.classList.toggle('selected', selectedColors.has(button.dataset.color)));
+    $('#strictOwnedToggle').checked = true;
+    clearDeckEditPreview(); persist(); persistDeck(); renderCollection();
+    els.commander.value = example.commander?.id || '';
+    generateDeck();
+    exampleMessage('Example ready: ' + FORMAT_LABELS[format] + ' · ' + style + '. These are demo cards, not your owned collection.' + (style === 'combo' ? ' This is a synergy-focused starting list, not a verified infinite combo.' : ''));
+  } catch (error) {
+    exampleMessage('Could not build the example. ' + (error.name === 'AbortError' ? 'Card lookup timed out.' : error.message) + ' Your existing collection was not replaced.');
+  } finally { exampleLoading = false; updateExampleButton(); }
 }
 
 // Events
+els.format.addEventListener('change', updateExampleButton);
+els.style.addEventListener('change', updateExampleButton);
+updateExampleButton();
 $('#openImportButton').addEventListener('click', openImport); $('#emptyImportButton').addEventListener('click', openImport); $('#collectionImportButton').addEventListener('click', openImport);
 $('#importListButton').addEventListener('click', importList); $('#arenaImportButton').addEventListener('click', importArenaDeck); $('#addSingleButton').addEventListener('click', async () => { const name = $('#singleCardName').value.trim(); const qty = Math.max(1, Number($('#singleQuantity').value || 1)); if (!name) { els.singleMessage.textContent = 'Enter a card name.'; return; } try { $('#addSingleButton').disabled = true; await addNamedCard(name, qty, els.singleMessage); persist(); renderCollection(); $('#singleCardName').value = ''; } catch (error) { els.singleMessage.textContent = error.message; } finally { $('#addSingleButton').disabled = false; } });
 $$('.import-tab').forEach(tab => tab.addEventListener('click', () => { $$('.import-tab').forEach(button => button.classList.toggle('active', button === tab)); $$('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.id === `${tab.dataset.tab}Panel`)); }));
