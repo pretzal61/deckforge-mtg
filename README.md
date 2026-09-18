@@ -9,3 +9,5 @@ After generating a deck, the local Deck Assistant can preview and apply in-place
 It also reports the main deck-building rules it checks: deck size, copy limits, recorded quantities when that option is enabled, Commander color identity, format legality returned by card lookup, and a basic mana-base diagnostic.
 
 The page does not make claims that it has verified an entire tournament rules environment. It is deliberately clear where a judge/event-specific check is still appropriate.
+
+Run the regression checks with `node --test regression.test.cjs` (Node.js 18 or newer). They cover mana allocation, colorless Commander identity, Vintage restrictions, basic-land edits, assistant command direction, Arena zone counts, example generation, and saved-state failure/reload behavior. Browser saves migrate from the original keys to a single collection-and-deck snapshot after a successful write; the original keys remain intact.

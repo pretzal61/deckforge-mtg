@@ -16,6 +16,10 @@ button { cursor:pointer; }
 .nav-link span { display:inline-block; width:26px; color:var(--gold); font-size:17px; vertical-align:-1px; }
 .nav-link:hover,.nav-link.active { background:#202a34; color:#fff; }
 .sidebar-foot { margin-top:auto; }
+@media (max-width:760px) {
+  .sidebar .sidebar-foot { display:block; margin-top:16px; }
+  .sidebar-foot #exampleButton { width:100%; white-space:normal; }
+}
 .collection-meter { padding:13px 11px 15px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; letter-spacing:.5px; text-transform:uppercase; }
 .collection-meter strong { display:block; margin:5px 0 10px; color:var(--ink); font-size:14px; letter-spacing:0; text-transform:none; }
 .meter-track { height:3px; overflow:hidden; background:#303a44; }.meter-track i { display:block; width:0%; height:100%; background:var(--gold); transition:width .4s; }

@@ -1,6 +1,7 @@
 /* Deckforge is intentionally local-first. Only card lookups use Scryfall's public API. */
 const STORAGE_KEY = 'deckforge-collection-v1';
 const DECK_STORAGE_KEY = 'deckforge-current-deck-v1';
+const STATE_STORAGE_KEY = 'deckforge-state-v2';
 const COLORS = ['W', 'U', 'B', 'R', 'G'];
 const FORMAT_LABELS = { casual: 'Casual', standard: 'Standard', pioneer: 'Pioneer', modern: 'Modern', legacy: 'Legacy', vintage: 'Vintage', commander: 'Commander' };
 const STYLE_COPY = {
@@ -30,20 +31,31 @@ const els = {
   assistantInput: $('#deckAssistantInput'), assistantMessage: $('#deckAssistantMessage'), assistantPreview: $('#deckAssistantPreview'), assistantPreviewText: $('#deckAssistantPreviewText'), reviewDeckEditButton: $('#reviewDeckEditButton'), applyDeckEditButton: $('#applyDeckEditButton'), discardDeckEditButton: $('#discardDeckEditButton'), undoDeckEditButton: $('#undoDeckEditButton')
 };
 
-function loadCollection() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } }
-function persist() { localStorage.setItem(STORAGE_KEY, JSON.stringify(collection)); }
+function loadCollection() {
+  try {
+    const state = JSON.parse(localStorage.getItem(STATE_STORAGE_KEY));
+    const cards = state ? state.collection : JSON.parse(localStorage.getItem(STORAGE_KEY));
+    return Array.isArray(cards) ? cards : [];
+  } catch { return []; }
+}
+// One atomic storage write keeps the collection and deck together. Existing v1
+// saves are read until the first successful v2 save; a failed write leaves them intact.
+function saveState(cards, deck) {
+  const saved = deck ? { ...deck, report: undefined, deckColors: [...(deck.deckColors || [])] } : null;
+  localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify({ collection: cards, deck: saved }));
+}
+function persist() { saveState(collection, currentDeck); }
 function loadDeck() {
   try {
-    const saved = JSON.parse(localStorage.getItem(DECK_STORAGE_KEY));
+    const state = JSON.parse(localStorage.getItem(STATE_STORAGE_KEY));
+    const saved = state ? state.deck : JSON.parse(localStorage.getItem(DECK_STORAGE_KEY));
     if (!saved || !Array.isArray(saved.deck)) return null;
     return { ...saved, deckColors: new Set(saved.deckColors || []), generatedAt: saved.generatedAt ? new Date(saved.generatedAt) : new Date(), report: [] };
   } catch { return null; }
 }
 function persistDeck() {
   try {
-    if (!currentDeck) { localStorage.removeItem(DECK_STORAGE_KEY); return; }
-    const { report, ...saved } = currentDeck;
-    localStorage.setItem(DECK_STORAGE_KEY, JSON.stringify({ ...saved, deckColors: [...(currentDeck.deckColors || [])] }));
+    saveState(collection, currentDeck);
   } catch { /* Local deck storage is a convenience; the current page can still work without it. */ }
 }
 function totalOwned() { return collection.reduce((total, card) => total + card.quantity, 0); }
@@ -104,11 +116,16 @@ function cardRole(card) {
   role.combo = /search your library|copy target|additional turn|infinite/.test(text);
   return role;
 }
-function meetsColors(card, allowed) { return !allowed.size || !(card.colorIdentity || []).some(color => !allowed.has(color)); }
+function meetsColors(card, allowed) { return !(card.colorIdentity || []).some(color => !allowed.has(color)); }
 function legalInFormat(card, format) {
   if (format === 'casual' || !card.legalities) return 'unknown';
   const result = card.legalities[format];
   return result === 'legal' ? 'legal' : result || 'unknown';
+}
+function rulesCopyLimit(card, format) {
+  if (legalInFormat(card, format) === 'restricted') return 1;
+  if (isBasicLand(card)) return Infinity;
+  return format === 'commander' ? 1 : 4;
 }
 
 function styleScore(card, style, deckColors) {
@@ -155,6 +172,36 @@ function preferredLandOrder(card, colors) {
   const identity = card.colorIdentity || []; const text = (card.oracleText || '').toLowerCase(); let score = 0;
   if (isBasicLand(card)) score += 3; if (identity.length > 1) score += 12; if (/any color|choose a color/.test(text)) score += 15; if (identity.some(c => colors.has(c))) score += 4; return score;
 }
+function landColors(card, colors) {
+  if (Array.isArray(card.producedMana)) return card.producedMana.filter(color => colors.has(color));
+  if (/any color/i.test(card.oracleText || '')) return [...colors];
+  return (card.colorIdentity || []).filter(color => colors.has(color));
+}
+function addBalancedLands(deck, lands, count, entryLimit, colors) {
+  const weights = Object.fromEntries([...colors].map(color => [color, 1]));
+  for (const { card, count: copies } of deck) {
+    if (cardRole(card).land) continue;
+    for (const symbol of (card.manaCost || '').match(/\{[^}]+\}/g) || []) {
+      for (const color of colors) if (symbol.includes(color)) weights[color] += copies;
+    }
+  }
+  const sources = Object.fromEntries([...colors].map(color => [color, 0]));
+  for (const entry of deck.filter(entry => cardRole(entry.card).land)) {
+    for (const color of landColors(entry.card, colors)) sources[color] += entry.count;
+  }
+  let added = 0;
+  while (added < count) {
+    const eligible = lands.filter(card => deckEntryCount(deck, card) < entryLimit(card));
+    if (!eligible.length) break;
+    const score = card => landColors(card, colors).reduce((sum, color) => sum + weights[color] / (sources[color] + 1), 0);
+    eligible.sort((a,b) => score(b) - score(a) || preferredLandOrder(b, colors) - preferredLandOrder(a, colors) || a.name.localeCompare(b.name));
+    const land = eligible[0];
+    if (!addToDeck(deck, land, 1, entryLimit(land))) break;
+    for (const color of landColors(land, colors)) sources[color]++;
+    added++;
+  }
+  return added;
+}
 
 function generateDeck() {
   if (!collection.length) { openImport(); els.importMessage.textContent = 'Add your cards first, then generate a list.'; return; }
@@ -162,9 +209,13 @@ function generateDeck() {
   const commander = format === 'commander' ? collection.find(card => card.id === els.commander.value) : null;
   if (format === 'commander' && !commander) { alert('Choose a legendary creature or planeswalker you own to lead this Commander deck.'); return; }
   const deckColors = determineColors(format, commander, style);
+  currentDeck = buildDeck(collection, format, style, commander, strictOwned, deckColors);
+  pendingDeckEdit = null; previousDeck = null;
+  persistDeck(); renderDeck(currentDeck);
+}
+function buildDeck(cards, format, style, commander, strictOwned, deckColors) {
   const required = format === 'commander' ? 100 : 60;
-  const maxCopies = format === 'commander' ? 1 : 4;
-  const candidates = collection.filter(card => {
+  const candidates = cards.filter(card => {
     const formatStatus = legalInFormat(card, format);
     return (card.id !== commander?.id) && meetsColors(card, deckColors) && formatStatus !== 'banned' && formatStatus !== 'not_legal';
   });
@@ -172,46 +223,32 @@ function generateDeck() {
   if (commander) addToDeck(deck, commander, 1, 1);
   const entryLimit = (card) => {
     const available = cardCopiesAvailable(card, commander, strictOwned);
-    if (isBasicLand(card)) return available;
-    return Math.min(available, maxCopies);
+    return Math.min(available, rulesCopyLimit(card, format));
   };
 
-  // First reserve an appropriately sized mana base from the cards actually recorded as owned.
+  // Reserve land slots, then use the chosen spells' mana costs to allocate lands.
   const landTarget = targetLandCount(format, style);
-  const lands = candidates.filter(card => cardRole(card).land).sort((a,b) => preferredLandOrder(b, deckColors) - preferredLandOrder(a, deckColors));
-  let landsAdded = 0;
-  for (const land of lands) {
-    if (landsAdded >= landTarget) break;
-    const permitted = entryLimit(land);
-    const added = addToDeck(deck, land, Math.min(permitted, landTarget - landsAdded), permitted);
-    landsAdded += added;
-  }
+  const lands = candidates.filter(card => cardRole(card).land);
+  const reservedLands = Math.min(landTarget, lands.reduce((sum, card) => sum + entryLimit(card), 0));
+  const spellTarget = required - reservedLands;
 
   const spells = candidates.filter(card => !cardRole(card).land).sort((a,b) => styleScore(b, style, deckColors) - styleScore(a, style, deckColors));
   // Give each unique spell one chance before filling copies, so casual decks do not become four-card piles.
   for (const spell of spells) {
-    if (deckCount(deck) >= required) break;
+    if (deckCount(deck) >= spellTarget) break;
     const permitted = entryLimit(spell);
-    addToDeck(deck, spell, Math.min(1, permitted, required - deckCount(deck)), maxCopies);
+    addToDeck(deck, spell, Math.min(1, permitted, spellTarget - deckCount(deck)), permitted);
   }
   for (const spell of spells) {
-    if (deckCount(deck) >= required) break;
+    if (deckCount(deck) >= spellTarget) break;
     const permitted = entryLimit(spell);
-    addToDeck(deck, spell, Math.min(permitted, required - deckCount(deck)), permitted);
+    addToDeck(deck, spell, Math.min(permitted, spellTarget - deckCount(deck)), permitted);
   }
   // If the pool has spare lands but is short, include them so the user sees the real size of their possible deck.
-  for (const land of lands) {
-    if (deckCount(deck) >= required) break;
-    const permitted = entryLimit(land);
-    addToDeck(deck, land, Math.min(permitted, required - deckCount(deck)), permitted);
-  }
+  const landsAdded = addBalancedLands(deck, lands, required - deckCount(deck), entryLimit, deckColors);
   const result = { deck, format, style, commander, deckColors, required, landTarget, landsAdded, strictOwned, generatedAt: new Date() };
-  result.report = validateDeck(result);
-  currentDeck = result;
-  pendingDeckEdit = null;
-  previousDeck = null;
-  persistDeck();
-  renderDeck(result);
+  result.report = validateDeck(result, cards);
+  return result;
 }
 
 function cloneDeckResult(result) {
@@ -235,7 +272,7 @@ function removeFromDeck(deck, card, quantity) {
 }
 function editorCopyLimit(card, result) {
   if (sameCard(card, result.commander)) return 1;
-  const rulesLimit = result.format === 'commander' ? 1 : isBasicLand(card) ? 99 : 4;
+  const rulesLimit = rulesCopyLimit(card, result.format);
   return result.strictOwned ? Math.min(rulesLimit, Number(card.quantity || 0)) : rulesLimit;
 }
 function canAddToEditedDeck(card, result) {
@@ -331,6 +368,8 @@ function assistantCount(value, fallback = 1) {
 function escapeRegExp(value) { return String(value).replace(/[.*+?^$\{}()|[\]\\]/g, '\\$&'); }
 function amountFor(text, term, fallback) {
   const count = '(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)';
+  // A removal quantity must not also be interpreted as an addition.
+  text = text.replace(new RegExp('\\b(?:remove|cut|reduce)\\s+(?:' + count + '|all)\\s+(?:more\\s+)?' + term + '\\b', 'gi'), '');
   const explicit = new RegExp('\\b' + count + '\\s+(?:more\\s+)?' + term + '\\b', 'i').exec(text);
   if (explicit) return Math.min(12, assistantCount(explicit[1], fallback));
   return new RegExp('\\b(?:more|add|increase|extra|need)\\s+' + term + '\\b', 'i').test(text) ? fallback : 0;
@@ -483,17 +522,17 @@ function undoDeckEdit() {
   els.undoDeckEditButton.classList.add('hidden');
 }
 
-function validateDeck(result) {
+function validateDeck(result, ownedCollection = collection) {
   const { deck, format, commander, deckColors, required, landTarget } = result; const total = deckCount(deck); const items = [];
   const isCommander = format === 'commander'; const legalSize = isCommander ? total === required : total >= required;
   items.push({ type: legalSize ? 'pass' : 'fail', title: 'Deck size', text: legalSize ? `${total} cards meets the ${isCommander ? 'exactly 100' : '60-card minimum'} for ${FORMAT_LABELS[format]}.` : `${total} cards recorded; ${isCommander ? 'Commander needs exactly 100' : 'constructed formats need at least 60'}.` });
   const lands = deck.filter(entry => cardRole(entry.card).land).reduce((sum,e) => sum + e.count, 0);
   items.push({ type: lands >= Math.max(18, landTarget - 3) ? 'pass' : 'warn', title: 'Mana base', text: `${lands} lands included; the plan targets about ${landTarget}. ${lands < landTarget ? 'More owned lands would make the deck more consistent.' : 'The land count supports this plan.'}` });
-  const tooMany = deck.filter(entry => entry.count > (isCommander ? 1 : 4) && !isBasicLand(entry.card));
-  items.push({ type: tooMany.length ? 'fail' : 'pass', title: 'Copy limit', text: tooMany.length ? `${tooMany.map(entry => entry.card.name).join(', ')} exceeds the normal copy limit.` : isCommander ? 'Every non-basic card appears no more than once.' : 'No non-basic card exceeds four copies.' });
+  const tooMany = deck.filter(entry => entry.count > rulesCopyLimit(entry.card, format));
+  items.push({ type: tooMany.length ? 'fail' : 'pass', title: 'Copy limit', text: tooMany.length ? `${tooMany.map(entry => entry.card.name).join(', ')} exceeds its copy limit (restricted cards allow one).` : isCommander ? 'Every non-basic card appears no more than once.' : 'All cards meet their copy limits, including restricted cards.' });
   if (result.strictOwned) {
     const unavailable = deck.filter(entry => {
-      const owned = collection.find(card => sameCard(card, entry.card));
+      const owned = ownedCollection.find(card => sameCard(card, entry.card));
       return !owned || entry.count > Number(owned.quantity || 0);
     });
     items.push({ type: unavailable.length ? 'fail' : 'pass', title: 'Owned quantities', text: unavailable.length ? unavailable.map(entry => entry.card.name).join(', ') + ' exceeds the quantities currently recorded in your collection.' : 'Every card count stays within the quantities you recorded.' });
@@ -503,12 +542,12 @@ function validateDeck(result) {
     items.push({ type: identityIssue.length || !isCommanderCandidate(commander) ? 'fail' : 'pass', title: 'Commander identity', text: identityIssue.length ? `${identityIssue.map(entry => entry.card.name).join(', ')} sits outside ${commander.name}'s color identity.` : `${commander.name} leads a color-identity compliant list.` });
   }
   if (format !== 'casual') {
-    const problems = deck.filter(entry => ['banned','not_legal'].includes(legalInFormat(entry.card, format)));
+    const problems = deck.filter(entry => ['banned','not_legal'].includes(legalInFormat(entry.card, format)) || (legalInFormat(entry.card, format) === 'restricted' && entry.count > 1));
     const unknown = deck.filter(entry => legalInFormat(entry.card, format) === 'unknown');
     items.push({ type: problems.length ? 'fail' : unknown.length ? 'warn' : 'pass', title: 'Format legality', text: problems.length ? `${problems.map(entry => entry.card.name).join(', ')} is not legal in this format.` : unknown.length ? `${unknown.length} card${unknown.length === 1 ? '' : 's'} need a fresh Scryfall lookup before event play.` : `All looked-up cards are listed as legal in ${FORMAT_LABELS[format]}.` });
   }
   const sourceCounts = Object.fromEntries([...deckColors].map(c => [c, 0]));
-  deck.filter(entry => cardRole(entry.card).land).forEach(entry => (entry.card.colorIdentity || []).forEach(c => { if (c in sourceCounts) sourceCounts[c] += entry.count; }));
+  deck.filter(entry => cardRole(entry.card).land).forEach(entry => landColors(entry.card, deckColors).forEach(c => { sourceCounts[c] += entry.count; }));
   if (deckColors.size > 1) items.push({ type: Object.values(sourceCounts).some(n => n < 5) ? 'warn' : 'pass', title: 'Color sources', text: Object.entries(sourceCounts).map(([c,n]) => `${c}: ${n}`).join(' · ') + '. Count lands with appropriate basic land types and mana abilities before serious play.' });
   return items;
 }
@@ -541,7 +580,7 @@ async function lookupCard(name) {
 }
 function cardFromScryfall(data) {
   const face = data.card_faces?.[0] || data;
-  return { id: data.id || `manual-${normalizeName(data.name)}`, name: data.name, quantity: 0, manaCost: data.mana_cost || face.mana_cost || '', cmc: data.cmc || 0, colorIdentity: data.color_identity || [], typeLine: data.type_line || face.type_line || '', oracleText: data.oracle_text || data.card_faces?.map(f => f.oracle_text || '').join(' // ') || '', legalities: data.legalities || null, imageUri: data.image_uris?.small || face.image_uris?.small || '', rarity: data.rarity || '' };
+  return { id: data.id || `manual-${normalizeName(data.name)}`, name: data.name, quantity: 0, manaCost: data.mana_cost || face.mana_cost || '', cmc: data.cmc || 0, colorIdentity: data.color_identity || [], producedMana: data.produced_mana, typeLine: data.type_line || face.type_line || '', oracleText: data.oracle_text || data.card_faces?.map(f => f.oracle_text || '').join(' // ') || '', legalities: data.legalities || null, imageUri: data.image_uris?.small || face.image_uris?.small || '', rarity: data.rarity || '' };
 }
 function mergeCard(incoming, quantity, mode = 'add') {
   const existing = collection.find(card => normalizeName(card.name) === normalizeName(incoming.name));
@@ -585,8 +624,12 @@ function parseArenaDeck(text) {
     item.quantities[currentSection] = (item.quantities[currentSection] || 0) + quantity;
     item.sections.add(currentSection); cards.set(key, item); sections[currentSection] += quantity;
   });
-  // A companion is commonly repeated in Sideboard. For a collection, a deck requires the largest zone count—not a sum across zones.
-  return { cards: [...cards.values()].map(item => ({ ...item, quantity: Math.max(...Object.values(item.quantities)) })), sections, ignored };
+  // Main-deck and sideboard copies are distinct. Only a companion's duplicate
+  // listing in the sideboard should be counted once.
+  return { cards: [...cards.values()].map(item => {
+    const q = item.quantities;
+    return { ...item, quantity: (q.deck || 0) + (q.commander || 0) + (q.other || 0) + Math.max(q.sideboard || 0, q.companion || 0) };
+  }), sections, ignored };
 }
 
 async function importArenaDeck() {
@@ -722,22 +765,29 @@ async function loadExample() {
   const beforeCollection = JSON.stringify(collection), beforeDeck = JSON.stringify(currentDeck);
   exampleLoading = true; updateExampleButton();
   exampleMessage('Finding legal cards for your format and playstyle… Internet access is required.');
+  let exampleSaved = false;
   try {
     const example = await makeExampleCollection(format, style);
     if (format !== els.format.value || style !== els.style.value || beforeCollection !== JSON.stringify(collection) || beforeDeck !== JSON.stringify(currentDeck)) {
       exampleMessage('Your settings or cards changed while loading. Nothing was replaced; click the example button again.');
       return;
     }
-    collection = example.cards; currentDeck = null; previousDeck = null;
+    const result = buildDeck(example.cards, format, style, example.commander, true, new Set(example.colors));
+    if (result.report.some(item => item.type === 'fail')) throw new Error('The example did not pass its rules checks.');
+    // Prepare and validate without mutating current state. setItem is atomic:
+    // quota or permission failures preserve both the old collection and old deck.
+    saveState(example.cards, result);
+    exampleSaved = true;
+    collection = example.cards; currentDeck = result; previousDeck = null;
     selectedColors = new Set(example.colors);
     $$('#colorPips button').forEach(button => button.classList.toggle('selected', selectedColors.has(button.dataset.color)));
     $('#strictOwnedToggle').checked = true;
-    clearDeckEditPreview(); persist(); persistDeck(); renderCollection();
+    clearDeckEditPreview(); renderCollection();
     els.commander.value = example.commander?.id || '';
-    generateDeck();
+    renderDeck(result);
     exampleMessage('Example ready: ' + FORMAT_LABELS[format] + ' · ' + style + '. These are demo cards, not your owned collection.' + (style === 'combo' ? ' This is a synergy-focused starting list, not a verified infinite combo.' : ''));
   } catch (error) {
-    exampleMessage('Could not build the example. ' + (error.name === 'AbortError' ? 'Card lookup timed out.' : error.message) + ' Your existing collection was not replaced.');
+    exampleMessage(exampleSaved ? 'The example was saved, but could not be displayed. Reload the page to restore it.' : 'Could not build the example. ' + (error.name === 'AbortError' ? 'Card lookup timed out.' : error.message) + ' Your existing collection and deck were not replaced.');
   } finally { exampleLoading = false; updateExampleButton(); }
 }
 
